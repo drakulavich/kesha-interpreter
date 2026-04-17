@@ -190,6 +190,89 @@ describe("E2E pipeline", () => {
     console.log(`  Pipeline: "ما أطول عودك" → "${english}" → ${audio.length} bytes (${audioDur.toFixed(1)}s)`);
   }, 15000);
 
+  test("ASR offline Recognize returns transcript for Arabic audio", async () => {
+    const samples = (await import("./fixtures/arabic_samples.json")).default;
+    const oggB64 = samples[0].audio_b64;
+    const expectedArabic = samples[0].sentence;
+
+    // Decode base64 OGG to raw PCM via sox
+    const { execSync } = await import("node:child_process");
+    const oggBuf = Buffer.from(oggB64, "base64");
+    const tmpAudio = `/tmp/test-asr-offline-${Date.now()}.mp3`;
+    const { writeFileSync, unlinkSync } = await import("node:fs");
+    writeFileSync(tmpAudio, oggBuf);
+    const pcm = execSync(`sox "${tmpAudio}" -t raw -r 16000 -c 1 -b 16 -e signed -`, {
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    unlinkSync(tmpAudio);
+
+    // Call unary Recognize
+    const result = await new Promise<string>((resolve, reject) => {
+      asrStub.Recognize(
+        {
+          config: {
+            encoding: 1,
+            sampleRateHertz: 16000,
+            languageCode: "ar-AR",
+            audioChannelCount: 1,
+            enableAutomaticPunctuation: true,
+          },
+          audio: pcm,
+        },
+        (err: Error | null, resp: any) => {
+          if (err) return reject(err);
+          const text = resp?.results?.[0]?.alternatives?.[0]?.transcript ?? "";
+          resolve(text);
+        },
+      );
+    });
+
+    expect(result.length).toBeGreaterThan(0);
+    console.log(`  ASR offline: "${result}"`);
+    console.log(`  Expected:    "${expectedArabic}"`);
+  }, 15000);
+
+  test("RivaClient offline pipeline: recognizeOffline → translate → synthesize", async () => {
+    const { RivaClient } = await import("../src/riva.ts");
+    const { loadConfig } = await import("../src/config.ts");
+
+    const cfg = loadConfig({
+      asrEndpoint: `${GPU}:50055`,
+      nmtEndpoint: `${GPU}:50051`,
+      ttsEndpoint: `${GPU}:50056`,
+      voiceName: "Magpie-Multilingual.EN-US.Leo",
+    });
+    const client = new RivaClient(cfg);
+
+    // Get real Arabic PCM
+    const samples = (await import("./fixtures/arabic_samples.json")).default;
+    const { execSync } = await import("node:child_process");
+    const { writeFileSync, unlinkSync } = await import("node:fs");
+    const oggBuf = Buffer.from(samples[0].audio_b64, "base64");
+    const tmpAudio = `/tmp/test-offline-pipeline-${Date.now()}.mp3`;
+    writeFileSync(tmpAudio, oggBuf);
+    const pcm = execSync(`sox "${tmpAudio}" -t raw -r 16000 -c 1 -b 16 -e signed -`, {
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    unlinkSync(tmpAudio);
+
+    // Step 1: Offline ASR
+    const arabic = await client.recognizeOffline(pcm as Buffer);
+    expect(arabic.length).toBeGreaterThan(0);
+    console.log(`  Offline ASR: "${arabic}"`);
+
+    // Step 2: Translate
+    const english = await client.translate(arabic);
+    expect(english.length).toBeGreaterThan(0);
+    console.log(`  NMT: "${english}"`);
+
+    // Step 3: Synthesize
+    const audio = await client.synthesize(english);
+    expect(audio.length).toBeGreaterThan(1000);
+    const dur = audio.length / (22050 * 2);
+    console.log(`  TTS: ${audio.length} bytes (${dur.toFixed(1)}s)`);
+  }, 30000);
+
   test("RivaClient openS2S emits audio events", async () => {
     // Import the actual client
     const { RivaClient } = await import("../src/riva.ts");

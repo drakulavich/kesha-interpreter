@@ -119,20 +119,23 @@ export class RivaClient {
     let translating = false;
     let ended = false;
 
-    // Periodically translate + speak new chunks (every 1.5s)
+    // Periodically translate + speak new chunks
     const translateAndSpeak = async () => {
       if (translating || !lastTranscript || lastTranscript === lastTranslatedAr) return;
+      // Skip noise: don't translate very short ASR fragments
+      if (lastTranscript.length < 10) return;
+
       translating = true;
       const arabic = lastTranscript;
       lastTranslatedAr = arabic;
 
       try {
         const fullEn = await this.translate(arabic);
-        if (!fullEn) { translating = false; return; }
+        if (!fullEn || fullEn.length < 5) { translating = false; return; }
 
         events.emit("partialTranslation", fullEn);
 
-        // Only speak the NEW part
+        // Only speak the NEW part beyond what's already been spoken
         let newText: string;
         if (fullEn.toLowerCase().startsWith(spokenEnglish.toLowerCase())) {
           newText = fullEn.slice(spokenEnglish.length).trim();
@@ -142,7 +145,8 @@ export class RivaClient {
           newText = "";
         }
 
-        if (newText.length >= 15) {
+        // Speak if we have a meaningful chunk (at least 3 words)
+        if (newText.length >= 12 && newText.split(" ").length >= 3) {
           spokenEnglish = fullEn;
           ttsQueue = ttsQueue.then(async () => {
             try {
@@ -155,7 +159,7 @@ export class RivaClient {
       translating = false;
     };
 
-    const speakInterval = setInterval(translateAndSpeak, 1500);
+    const speakInterval = setInterval(translateAndSpeak, 1000);
 
     asrCall.on("data", (msg: any) => {
       for (const result of msg?.results ?? []) {

@@ -26,20 +26,18 @@ export function openMic(sampleRate: number): MicHandle {
 export class Player {
   private proc: ChildProcess | null = null;
   private readonly sampleRate: number;
-  private readonly speed: number;
 
-  constructor(sampleRate: number, speed = 1.3) {
+  constructor(sampleRate: number) {
     this.sampleRate = sampleRate;
-    this.speed = speed;
   }
 
   write(chunk: Buffer): void {
     if (!this.proc) {
-      // Play at higher sample rate to speed up speech (e.g., 1.3x)
-      const playRate = Math.round(this.sampleRate * this.speed);
+      // tempo effect speeds up without changing pitch
       this.proc = spawn("play", [
-        "-q", "-t", "raw", "-r", String(playRate),
+        "-q", "-t", "raw", "-r", String(this.sampleRate),
         "-b", "16", "-c", "1", "-e", "signed-integer", "-",
+        "tempo", "1.3",
       ], { stdio: ["pipe", "ignore", "ignore"] });
       this.proc.on("close", () => { this.proc = null; });
     }

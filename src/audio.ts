@@ -24,7 +24,7 @@ export function openMic(sampleRate: number): MicHandle {
 }
 
 export class Player {
-  private proc: ChildProcess | null = null;
+  private pending: Buffer[] = [];
   private readonly sampleRate: number;
 
   constructor(sampleRate: number) {
@@ -32,22 +32,32 @@ export class Player {
   }
 
   write(chunk: Buffer): void {
-    if (!this.proc) {
-      this.proc = spawn("play", [
-        "-q", "-t", "raw", "-r", String(this.sampleRate),
-        "-b", "16", "-c", "1", "-e", "signed-integer", "-",
-      ], { stdio: ["pipe", "ignore", "ignore"] });
-      this.proc.on("close", () => { this.proc = null; });
-    }
-    if (this.proc?.stdin?.writable) {
-      this.proc.stdin.write(chunk);
-    }
+    this.pending.push(chunk);
   }
 
-  /** End current playback — sox needs stdin closed to process tempo effect. */
+  /** Flush buffered audio — save as WAV and play with afplay. */
   flush(): void {
-    try { this.proc?.stdin?.end(); } catch {}
-    this.proc = null; // next write() spawns fresh sox
+    if (this.pending.length === 0) return;
+    const pcm = Buffer.concat(this.pending);
+    this.pending = [];
+    if (pcm.length === 0) return;
+
+    // Build WAV
+    const h = Buffer.alloc(44);
+    h.write("RIFF", 0); h.writeUInt32LE(36 + pcm.length, 4);
+    h.write("WAVE", 8); h.write("fmt ", 12); h.writeUInt32LE(16, 16);
+    h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22);
+    h.writeUInt32LE(this.sampleRate, 24); h.writeUInt32LE(this.sampleRate * 2, 28);
+    h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34);
+    h.write("data", 36); h.writeUInt32LE(pcm.length, 40);
+
+    const tmpFile = `/tmp/ar-en-simul-${Date.now()}.wav`;
+    const fs = require("fs");
+    fs.writeFileSync(tmpFile, Buffer.concat([h, pcm]));
+
+    // afplay works alongside rec (separate CoreAudio streams)
+    const p = spawn("afplay", [tmpFile], { stdio: "ignore" });
+    p.on("close", () => { try { fs.unlinkSync(tmpFile); } catch {} });
   }
 
   close(): void {

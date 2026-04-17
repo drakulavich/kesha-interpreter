@@ -1,18 +1,15 @@
 /**
- * Thin wrapper around the Riva NMT gRPC service, specifically the
- * `StreamingTranslateSpeechToSpeech` RPC.
+ * 3-hop gRPC pipeline: ASR (streaming) → NMT (unary) → TTS (unary/streaming)
  *
- * That RPC takes a bidi stream:
- *   client -> server:  first message is a config; subsequent messages are raw
- *                      PCM audio chunks in the mic's source language
- *   server -> client:  stream of { speech: { audio: <bytes> } } — synthesized
- *                      audio chunks in the target language. The server sends an
- *                      empty buffer to mark end-of-stream for a given utterance.
+ * Each service runs in its own NIM container:
+ *   - ASR: Parakeet 1.1B multilingual (streaming, returns partials)
+ *   - NMT: Riva Translate 1.6B (unary, ar → en)
+ *   - TTS: Magpie TTS multilingual (unary, returns PCM audio)
  *
- * Under the hood the Riva NIM runs a cascade: ASR (Canary / Parakeet) -> NMT
- * -> TTS (FastPitch + HiFi-GAN). Everything stays on the GPU so the extra hops
- * are effectively free.
+ * The S2SSession interface stays the same as the old single-call approach,
+ * so modes.ts doesn't need to change.
  */
+
 import * as grpc from "@grpc/grpc-js";
 import protoLoader from "@grpc/proto-loader";
 import { EventEmitter } from "node:events";
@@ -23,151 +20,189 @@ import type { Config } from "./config.ts";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROTO_DIR = path.resolve(__dirname, "..", "protos");
 
-// AudioEncoding enum values from riva_audio.proto
 const ENC_LINEAR_PCM = 1;
 
-export function buildS2SConfigMessage(cfg: Config) {
-  return {
-    config: {
-      asrConfig: {
-        config: {
-          encoding: ENC_LINEAR_PCM,
-          sampleRateHertz: cfg.inputSampleRate,
-          // Use en-US for ASR model lookup — the multilingual model auto-detects
-          // the actual language from audio. The NMT cascade strips region codes
-          // (ar-AR → ar) which breaks model matching. This workaround avoids it.
-          languageCode: "en-US",
-          maxAlternatives: 1,
-          enableAutomaticPunctuation: true,
-          audioChannelCount: 1,
-        },
-        interimResults: cfg.interimResults,
-      },
-      translationConfig: {
-        sourceLanguageCode: cfg.sourceLang,
-        targetLanguageCode: cfg.targetLang,
-        modelName: cfg.s2sModel,
-      },
-      ttsConfig: {
-        encoding: ENC_LINEAR_PCM,
-        sampleRateHz: cfg.outputSampleRate,
-        voiceName: cfg.voiceName,
-        languageCode: cfg.targetLang,
-      },
-    },
-  };
-}
-
-// The types we actually touch; we keep it loose because proto-loader returns `any`.
-type StreamingS2SClient = grpc.Client & {
-  StreamingTranslateSpeechToSpeech: () => grpc.ClientDuplexStream<unknown, unknown>;
+const GRPC_OPTS = {
+  "grpc.max_receive_message_length": 64 * 1024 * 1024,
+  "grpc.max_send_message_length": 64 * 1024 * 1024,
+  "grpc.keepalive_time_ms": 30_000,
+  "grpc.keepalive_timeout_ms": 10_000,
+  "grpc.keepalive_permit_without_calls": 1,
 };
 
 export interface S2SSession {
-  /** Send a raw PCM16 mono chunk from the microphone. */
   sendAudio(chunk: Buffer): void;
-  /** Signal end-of-utterance. The server finishes any in-flight synthesis. */
   end(): void;
-  /** Tear down the whole RPC. */
   close(): void;
-  /** EventEmitter: "audio" (Buffer), "end", "error" (Error). */
   events: EventEmitter;
 }
 
 export class RivaClient {
-  private readonly client: StreamingS2SClient;
+  private readonly asrStub: any;
+  private readonly nmtStub: any;
+  private readonly ttsStub: any;
   private readonly cfg: Config;
 
   constructor(cfg: Config) {
     this.cfg = cfg;
-
-    const packageDef = protoLoader.loadSync(
-      path.join(PROTO_DIR, "riva_nmt.proto"),
-      {
-        keepCase: false,
-        longs: String,
-        enums: Number,
-        defaults: true,
-        oneofs: true,
-        includeDirs: [PROTO_DIR],
-      },
-    );
-
-    const proto = grpc.loadPackageDefinition(packageDef) as any;
-    const RivaTranslation = proto.nvidia.riva.nmt.RivaTranslation;
-
     const creds = this.buildCredentials();
-    this.client = new RivaTranslation(cfg.endpoint, creds, {
-      "grpc.max_receive_message_length": 64 * 1024 * 1024,
-      "grpc.max_send_message_length": 64 * 1024 * 1024,
-      // Keepalive so long conversational sessions don't get dropped by NATs.
-      "grpc.keepalive_time_ms": 30_000,
-      "grpc.keepalive_timeout_ms": 10_000,
-      "grpc.keepalive_permit_without_calls": 1,
-    });
+
+    // Load ASR proto
+    const asrPkg = protoLoader.loadSync(
+      path.join(PROTO_DIR, "riva_asr.proto"),
+      { keepCase: false, longs: String, enums: Number, defaults: true, oneofs: true, includeDirs: [PROTO_DIR] },
+    );
+    const asrProto = grpc.loadPackageDefinition(asrPkg) as any;
+    this.asrStub = new asrProto.nvidia.riva.asr.RivaSpeechRecognition(cfg.asrEndpoint, creds, GRPC_OPTS);
+
+    // Load NMT proto
+    const nmtPkg = protoLoader.loadSync(
+      path.join(PROTO_DIR, "riva_nmt.proto"),
+      { keepCase: false, longs: String, enums: Number, defaults: true, oneofs: true, includeDirs: [PROTO_DIR] },
+    );
+    const nmtProto = grpc.loadPackageDefinition(nmtPkg) as any;
+    this.nmtStub = new nmtProto.nvidia.riva.nmt.RivaTranslation(cfg.nmtEndpoint, creds, GRPC_OPTS);
+
+    // Load TTS proto
+    const ttsPkg = protoLoader.loadSync(
+      path.join(PROTO_DIR, "riva_tts.proto"),
+      { keepCase: false, longs: String, enums: Number, defaults: true, oneofs: true, includeDirs: [PROTO_DIR] },
+    );
+    const ttsProto = grpc.loadPackageDefinition(ttsPkg) as any;
+    this.ttsStub = new ttsProto.nvidia.riva.tts.RivaSpeechSynthesis(cfg.ttsEndpoint, creds, GRPC_OPTS);
   }
 
   private buildCredentials(): grpc.ChannelCredentials {
-    const base = this.cfg.tls
-      ? grpc.credentials.createSsl()
-      : grpc.credentials.createInsecure();
-
+    const base = this.cfg.tls ? grpc.credentials.createSsl() : grpc.credentials.createInsecure();
     if (!this.cfg.apiKey) return base;
-
-    // Attach bearer-style metadata (NGC/NIM accepts "authorization: Bearer <key>").
-    const callCreds = grpc.credentials.createFromMetadataGenerator(
-      (_params, cb) => {
-        const md = new grpc.Metadata();
-        md.add("authorization", `Bearer ${this.cfg.apiKey}`);
-        cb(null, md);
-      },
-    );
+    const callCreds = grpc.credentials.createFromMetadataGenerator((_p, cb) => {
+      const md = new grpc.Metadata();
+      md.add("authorization", `Bearer ${this.cfg.apiKey}`);
+      cb(null, md);
+    });
     return grpc.credentials.combineChannelCredentials(base, callCreds);
   }
 
   /**
-   * Open a new streaming speech-to-speech session. You send PCM16 chunks in,
-   * you receive PCM chunks out via the returned EventEmitter.
+   * Open a 3-hop session: ASR streaming → NMT → TTS.
+   *
+   * Audio chunks go to ASR. When ASR stream ends, the last transcript
+   * is translated via NMT, then synthesized via TTS. Audio chunks
+   * from TTS are emitted on the "audio" event.
    */
   openS2S(): S2SSession {
     const events = new EventEmitter();
-    const call = this.client.StreamingTranslateSpeechToSpeech();
+    const cfg = this.cfg;
 
-    // Step 1: send the config message first.
-    call.write(buildS2SConfigMessage(this.cfg));
+    // Step 1: Open ASR streaming call
+    const asrCall = this.asrStub.StreamingRecognize();
 
-    call.on("data", (msg: any) => {
-      const audio: Buffer | undefined = msg?.speech?.audio;
-      if (audio && audio.length > 0) {
-        events.emit("audio", audio);
-      } else {
-        // Empty buffer == end-of-utterance marker from the server.
-        events.emit("utteranceEnd");
+    // Send ASR config
+    asrCall.write({
+      streamingConfig: {
+        config: {
+          encoding: ENC_LINEAR_PCM,
+          sampleRateHertz: cfg.inputSampleRate,
+          languageCode: cfg.sourceLang,
+          audioChannelCount: 1,
+          enableAutomaticPunctuation: true,
+        },
+        interimResults: true,
+      },
+    });
+
+    let lastTranscript = "";
+    let ended = false;
+
+    // Collect ASR partials, track last transcript
+    asrCall.on("data", (msg: any) => {
+      for (const result of msg?.results ?? []) {
+        const text = result?.alternatives?.[0]?.transcript ?? "";
+        if (text) {
+          lastTranscript = text;
+          events.emit("partial", text);
+        }
       }
     });
 
-    call.on("error", (err: Error) => events.emit("error", err));
-    call.on("end", () => events.emit("end"));
+    asrCall.on("error", (err: Error) => events.emit("error", err));
 
-    let ended = false;
+    // When ASR stream ends, run NMT → TTS
+    asrCall.on("end", () => {
+      if (!lastTranscript) {
+        events.emit("utteranceEnd");
+        events.emit("end");
+        return;
+      }
+
+      const arabic = lastTranscript;
+      events.emit("transcript", arabic);
+
+      // Step 2: NMT
+      this.nmtStub.TranslateText(
+        {
+          texts: [arabic],
+          sourceLanguageCode: cfg.sourceLang.split("-")[0], // "ar"
+          targetLanguageCode: cfg.targetLang.split("-")[0], // "en"
+        },
+        (nmtErr: Error | null, nmtResp: any) => {
+          if (nmtErr) {
+            events.emit("error", nmtErr);
+            events.emit("end");
+            return;
+          }
+
+          const english = nmtResp?.translations?.[0]?.text ?? "";
+          if (!english) {
+            events.emit("utteranceEnd");
+            events.emit("end");
+            return;
+          }
+
+          events.emit("translation", english);
+
+          // Step 3: TTS
+          this.ttsStub.Synthesize(
+            {
+              text: english,
+              languageCode: cfg.targetLang,
+              encoding: ENC_LINEAR_PCM,
+              sampleRateHz: cfg.outputSampleRate,
+              voiceName: cfg.voiceName,
+            },
+            (ttsErr: Error | null, ttsResp: any) => {
+              if (ttsErr) {
+                events.emit("error", ttsErr);
+                events.emit("end");
+                return;
+              }
+
+              const audio = ttsResp?.audio;
+              if (audio && audio.length > 0) {
+                events.emit("audio", Buffer.from(audio));
+              }
+              events.emit("utteranceEnd");
+              events.emit("end");
+            },
+          );
+        },
+      );
+    });
+
     return {
       sendAudio(chunk: Buffer) {
         if (ended) return;
-        call.write({ audioContent: chunk });
+        asrCall.write({ audioContent: chunk });
       },
       end() {
         if (ended) return;
         ended = true;
-        call.end();
+        asrCall.end();
       },
       close() {
         if (ended) return;
         ended = true;
-        try {
-          call.cancel();
-        } catch {
-          /* ignore */
-        }
+        try { asrCall.cancel(); } catch {}
       },
       events,
     };

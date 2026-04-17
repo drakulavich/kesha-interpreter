@@ -2,8 +2,8 @@
 /**
  * ar-en-simul — Arabic → English simultaneous interpreter
  *
- * Always listening by default. Single gRPC call to Riva NIM cascade
- * (ASR → NMT → TTS) — all on GPU, ~500-900ms end-to-end.
+ * 3-hop gRPC pipeline: Parakeet ASR → Riva NMT → Magpie TTS
+ * Each service in its own NIM container on GPU.
  */
 
 import { defineCommand, runMain } from "citty";
@@ -19,10 +19,25 @@ const main = defineCommand({
     version: "1.0.0",
   },
   args: {
-    endpoint: {
+    gpu: {
       type: "string",
-      default: process.env.RIVA_ENDPOINT ?? "localhost:50051",
-      description: "Riva NMT gRPC endpoint (host:port)",
+      default: process.env.GPU_HOST ?? "localhost",
+      description: "GPU server hostname or IP",
+    },
+    "asr-port": {
+      type: "string",
+      default: process.env.RIVA_ASR_PORT ?? "50055",
+      description: "ASR gRPC port",
+    },
+    "nmt-port": {
+      type: "string",
+      default: process.env.RIVA_NMT_PORT ?? "50051",
+      description: "NMT gRPC port",
+    },
+    "tts-port": {
+      type: "string",
+      default: process.env.RIVA_TTS_PORT ?? "50056",
+      description: "TTS gRPC port",
     },
     tls: {
       type: "boolean",
@@ -32,7 +47,7 @@ const main = defineCommand({
     "api-key": {
       type: "string",
       default: process.env.RIVA_API_KEY ?? "",
-      description: "Bearer token for the endpoint",
+      description: "Bearer token for auth",
     },
     ptt: {
       type: "boolean",
@@ -63,8 +78,11 @@ const main = defineCommand({
   async run({ args }) {
     ui.header();
 
+    const gpu = args.gpu;
     const cfg = loadConfig({
-      endpoint: args.endpoint,
+      asrEndpoint: `${gpu}:${args["asr-port"]}`,
+      nmtEndpoint: `${gpu}:${args["nmt-port"]}`,
+      ttsEndpoint: `${gpu}:${args["tts-port"]}`,
       tls: args.tls,
       apiKey: args["api-key"] || undefined,
       voiceName: args.voice,
@@ -73,14 +91,27 @@ const main = defineCommand({
       verbose: args.verbose,
     });
 
-    // Health check — verify gRPC endpoint is reachable
-    ui.connecting(cfg.endpoint);
-    const healthy = await checkHealth(cfg.endpoint, cfg.tls);
-    if (healthy) {
-      ui.connected(cfg.endpoint);
-    } else {
-      ui.connectFailed(cfg.endpoint, "unreachable");
-      console.log(ui.pc.dim(`\n  Check that Riva NIM is running on ${cfg.endpoint}\n`));
+    // Health check all 3 services
+    const services = [
+      { name: "ASR", endpoint: cfg.asrEndpoint },
+      { name: "NMT", endpoint: cfg.nmtEndpoint },
+      { name: "TTS", endpoint: cfg.ttsEndpoint },
+    ];
+
+    let allHealthy = true;
+    for (const { name, endpoint } of services) {
+      ui.connecting(`${name} ${endpoint}`);
+      const ok = await checkHealth(endpoint, cfg.tls);
+      if (ok) {
+        ui.connected(`${name} ${endpoint}`);
+      } else {
+        ui.connectFailed(`${name} ${endpoint}`, "unreachable");
+        allHealthy = false;
+      }
+    }
+
+    if (!allHealthy) {
+      console.log(ui.pc.dim(`\n  Check that all Riva NIMs are running on ${gpu}\n`));
       process.exit(1);
     }
 

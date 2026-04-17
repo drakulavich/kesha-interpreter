@@ -1,56 +1,53 @@
 /**
- * Runtime configuration. Most fields can be overridden via CLI flags or env vars.
+ * Runtime configuration.
  *
- * Env vars honored:
- *   RIVA_ENDPOINT        host:port of the Riva NMT NIM (gRPC)                 (default: localhost:50051)
- *   RIVA_TLS             "1" to use SSL credentials                            (default: 0 / insecure)
- *   RIVA_API_KEY         NGC/API key if the endpoint requires auth             (optional)
- *   INPUT_SAMPLE_RATE    mic sample rate in Hz                                 (default: 16000)
- *   OUTPUT_SAMPLE_RATE   TTS output sample rate in Hz                          (default: 44100)
+ * Env vars:
+ *   RIVA_ASR_ENDPOINT    ASR gRPC endpoint      (default: localhost:50055)
+ *   RIVA_NMT_ENDPOINT    NMT gRPC endpoint      (default: localhost:50051)
+ *   RIVA_TTS_ENDPOINT    TTS gRPC endpoint      (default: localhost:50056)
+ *   RIVA_TLS             "1" for SSL             (default: 0)
+ *   RIVA_API_KEY         NGC auth key            (optional)
  */
 export interface Config {
-  endpoint: string;
+  asrEndpoint: string;
+  nmtEndpoint: string;
+  ttsEndpoint: string;
   tls: boolean;
   apiKey?: string;
 
-  sourceLang: string; // BCP-47, e.g. "ar-AR"
-  targetLang: string; // BCP-47, e.g. "en-US"
-  voiceName: string;  // Riva TTS voice, e.g. "English-US.Female-1"
+  sourceLang: string;   // BCP-47, e.g. "ar-AR"
+  targetLang: string;   // BCP-47, e.g. "en-US"
+  voiceName: string;    // Magpie voice, e.g. "Magpie-Multilingual.EN-US.Sofia"
 
-  s2sModel: string;   // Riva S2S model name; "s2s_model" is the Riva default
+  inputSampleRate: number;
+  outputSampleRate: number;
 
-  inputSampleRate: number;   // mic SR (Hz) — 16 kHz is standard for Riva ASR
-  outputSampleRate: number;  // TTS SR (Hz)
+  vadAggressiveness: 0 | 1 | 2 | 3;
+  silenceMsToFlush: number;
+  maxSegmentMs: number;
 
-  // VAD / chunking knobs (only used in --live mode)
-  vadAggressiveness: 0 | 1 | 2 | 3; // 0=permissive, 3=strict
-  silenceMsToFlush: number;         // ms of trailing silence to flush a segment
-  maxSegmentMs: number;             // hard cap per segment
-
-  interimResults: boolean; // print partial (pre-finalized) translations
   verbose: boolean;
 }
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
   const defaults: Config = {
-    endpoint: process.env.RIVA_ENDPOINT ?? "localhost:50051",
+    asrEndpoint: process.env.RIVA_ASR_ENDPOINT ?? "localhost:50055",
+    nmtEndpoint: process.env.RIVA_NMT_ENDPOINT ?? "localhost:50051",
+    ttsEndpoint: process.env.RIVA_TTS_ENDPOINT ?? "localhost:50056",
     tls: process.env.RIVA_TLS === "1",
     apiKey: process.env.RIVA_API_KEY,
 
     sourceLang: "ar-AR",
     targetLang: "en-US",
-    voiceName: "English-US.Female-1",
-
-    s2sModel: "s2s_model",
+    voiceName: "Magpie-Multilingual.EN-US.Sofia",
 
     inputSampleRate: Number(process.env.INPUT_SAMPLE_RATE ?? 16000),
-    outputSampleRate: Number(process.env.OUTPUT_SAMPLE_RATE ?? 44100),
+    outputSampleRate: Number(process.env.OUTPUT_SAMPLE_RATE ?? 22050),
 
     vadAggressiveness: 2,
     silenceMsToFlush: 600,
     maxSegmentMs: 8000,
 
-    interimResults: true,
     verbose: false,
   };
   return { ...defaults, ...overrides };

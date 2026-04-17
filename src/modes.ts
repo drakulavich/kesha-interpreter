@@ -98,59 +98,209 @@ function wireSession(session: S2SSession, player: Player, cfg: Config) {
   });
 }
 
+type ReleaseHandle = { cancel(): void };
+type Keypress = { ctrl?: boolean; name?: string };
+
+export interface PushToTalkControllerDeps {
+  minBufferedBytes: number;
+  processAudio(audio: Buffer): Promise<void>;
+  scheduleRelease(fn: () => void | Promise<void>): ReleaseHandle;
+  onRecordingStart?: () => void;
+  onRecordingStop?: (audio: Buffer) => void;
+  onShortRecording?: (audio: Buffer) => void;
+  onProcessError?: (err: Error) => void;
+  ui: {
+    recording(): void;
+    translating(): void;
+    error(msg: string): void;
+  };
+}
+
+export interface LiveControllerDeps {
+  openSession(): S2SSession;
+  isMuted?: () => boolean;
+  ui?: {
+    speechDetected?: () => void;
+    translating?: () => void;
+    error?: (msg: string) => void;
+  };
+}
+
+export function createPushToTalkController(deps: PushToTalkControllerDeps) {
+  let recording = false;
+  let processing = false;
+  let audioChunks: Buffer[] = [];
+  let releaseHandle: ReleaseHandle | null = null;
+
+  const finishRecording = async () => {
+    if (!recording) return;
+
+    recording = false;
+    const audio = Buffer.concat(audioChunks);
+    audioChunks = [];
+    deps.onRecordingStop?.(audio);
+
+    if (audio.length < deps.minBufferedBytes) {
+      deps.onShortRecording?.(audio);
+      return;
+    }
+
+    processing = true;
+    deps.ui.translating();
+
+    try {
+      await deps.processAudio(audio);
+    } catch (err: any) {
+      deps.onProcessError?.(err);
+      deps.ui.error(err?.message ?? "Pipeline error");
+    } finally {
+      processing = false;
+    }
+  };
+
+  return {
+    handleKeypress(key: Keypress) {
+      if (key.name !== "space" || processing) return;
+
+      if (!recording) {
+        recording = true;
+        audioChunks = [];
+        deps.onRecordingStart?.();
+        deps.ui.recording();
+      }
+
+      releaseHandle?.cancel();
+      releaseHandle = deps.scheduleRelease(() => void finishRecording());
+    },
+    handleMicData(chunk: Buffer) {
+      if (recording) audioChunks.push(Buffer.from(chunk));
+    },
+    shutdown() {
+      releaseHandle?.cancel();
+      releaseHandle = null;
+      recording = false;
+      audioChunks = [];
+    },
+  };
+}
+
+export function createLiveController(deps: LiveControllerDeps) {
+  let session: S2SSession | null = null;
+
+  return {
+    handleSegmentStart() {
+      if (session) return;
+      session = deps.openSession();
+      deps.ui?.speechDetected?.();
+    },
+    handleFrame(frame: Buffer) {
+      if (!session || deps.isMuted?.()) return;
+      session.sendAudio(frame);
+    },
+    handleSegmentEnd() {
+      if (!session) return;
+      const activeSession = session;
+      session = null;
+      activeSession.end();
+      deps.ui?.translating?.();
+    },
+    shutdown() {
+      if (!session) return;
+      session.close();
+      session = null;
+    },
+  };
+}
+
 export async function runPushToTalk(cfg: Config): Promise<void> {
   startDebugRecording();
   const riva = new RivaClient(cfg);
   const player = new Player(cfg.outputSampleRate);
   const mic = openMic(cfg.inputSampleRate);
 
-  let session: S2SSession | null = null;
-  let talking = false;
+  const processUtterance = async (audio: Buffer) => {
+    trackEvent("processStart");
 
-  const startUtterance = () => {
-    talking = true;
-    session = riva.openS2S();
-    wireSession(session, player, cfg);
-    trackEvent("startUtterance");
+    trackEvent("asrStart");
+    const arabic = await riva.recognizeOffline(audio);
+    trackEvent("asrResult", arabic);
+    log(`ASR offline: ${arabic.slice(0, 80)}`);
+
+    if (!arabic || arabic.length < 5) {
+      log("ASR too short, skipping");
+      ui.clr();
+      return;
+    }
+
+    const english = await riva.translate(arabic);
+    trackEvent("translation", english);
+    log(`NMT: ${english.slice(0, 80)}`);
+
+    if (!english || english.length < 5) {
+      log("NMT too short, skipping");
+      ui.clr();
+      return;
+    }
+
+    ui.clr();
+    console.log(ui.pc.white(`  ${english}`));
+
+    const ttsAudio = await riva.synthesize(english);
+    trackEvent("audio", `${ttsAudio.length}b`);
+    log(`TTS: ${ttsAudio.length}b`);
+
+    if (ttsAudio.length > 0) {
+      player.write(ttsAudio);
+      player.flush();
+    }
   };
 
-  const endUtterance = () => {
-    if (!talking || !session) return;
-    talking = false;
-    session.end();
-    session = null;
-    trackEvent("endUtterance");
-  };
+  let lastSpaceMs = 0;
+  const GAP_MS = 250;
+
+  const controller = createPushToTalkController({
+    minBufferedBytes: Math.floor(cfg.inputSampleRate * 2 * 0.3),
+    processAudio: processUtterance,
+    scheduleRelease: (fn) => {
+      const scheduledAt = lastSpaceMs;
+      const timer = setTimeout(() => {
+        if (scheduledAt === lastSpaceMs) void fn();
+      }, GAP_MS + 20);
+      return { cancel: () => clearTimeout(timer) };
+    },
+    onRecordingStart: () => trackEvent("startRecording"),
+    onRecordingStop: () => trackEvent("stopRecording"),
+    onShortRecording: () => {
+      log("Recording too short, skipping");
+      ui.clr();
+    },
+    onProcessError: (err) => {
+      log(`ERROR: ${err.message.slice(0, 80)}`);
+      trackEvent("error", err.message.slice(0, 100));
+    },
+    ui,
+  });
 
   mic.stream.on("data", (chunk: Buffer) => {
     recordAudio(chunk);
-    if (talking && session && !muted) session.sendAudio(chunk);
+    controller.handleMicData(chunk);
   });
 
   readline.emitKeypressEvents(process.stdin);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
-
-  let lastSpaceMs = 0;
-  let releaseTimer: NodeJS.Timeout | null = null;
-  const GAP_MS = 250;
 
   process.stdin.on("keypress", (_str, key) => {
     if (!key) return;
     if ((key.ctrl && key.name === "c") || key.name === "q") { shutdown(); return; }
     if (key.name === "space") {
       lastSpaceMs = Date.now();
-      if (!talking) startUtterance();
-      if (releaseTimer) clearTimeout(releaseTimer);
-      releaseTimer = setTimeout(() => {
-        if (Date.now() - lastSpaceMs >= GAP_MS) endUtterance();
-      }, GAP_MS + 20);
+      controller.handleKeypress(key);
     }
   });
 
   const shutdown = () => {
-    if (releaseTimer) clearTimeout(releaseTimer);
+    controller.shutdown();
     mic.stop();
-    if (session) session.close();
     player.close();
     ui.clr();
     ui.showCursor();
@@ -175,25 +325,28 @@ export async function runLive(cfg: Config): Promise<void> {
     silenceMsToFlush: cfg.silenceMsToFlush,
     maxSegmentMs: cfg.maxSegmentMs,
   });
-
-  let session: S2SSession | null = null;
+  const controller = createLiveController({
+    openSession: () => {
+      const session = riva.openS2S();
+      wireSession(session, player, cfg);
+      return session;
+    },
+    isMuted: () => muted,
+    ui,
+  });
 
   vad.events.on("segmentStart", () => {
-    session = riva.openS2S();
-    wireSession(session, player, cfg);
+    controller.handleSegmentStart();
     trackEvent("segmentStart");
     log("VAD: segment start");
   });
 
   vad.events.on("frame", (frame: Buffer) => {
-    if (session && !muted) session.sendAudio(frame);
+    controller.handleFrame(frame);
   });
 
   vad.events.on("segmentEnd", () => {
-    if (!session) return;
-    const s = session;
-    session = null;
-    s.end();
+    controller.handleSegmentEnd();
     trackEvent("segmentEnd");
     log("VAD: segment end");
   });
@@ -206,7 +359,7 @@ export async function runLive(cfg: Config): Promise<void> {
   const shutdown = () => {
     mic.stop();
     vad.flush();
-    if (session) session.close();
+    controller.shutdown();
     player.close();
     ui.clr();
     ui.showCursor();

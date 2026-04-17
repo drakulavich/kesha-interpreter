@@ -1,4 +1,4 @@
-# ar-en-simul
+# kesha-interpreter
 
 Simultaneous Arabic → English speech interpreter. Speaks English **while you're still talking Arabic** — like a UN interpreter with ~2s delay.
 
@@ -17,7 +17,7 @@ Three NVIDIA NIM containers on your GPU server, connected via gRPC. The CLI tran
 ## Demo
 
 ```
-  ar-en-simul — Arabic → English
+  kesha-interpreter — Arabic → English
 
   ✓ ASR 10.119.62.29:50055
   ✓ NMT 10.119.62.29:50051
@@ -35,19 +35,35 @@ English voice plays simultaneously as Arabic speech is recognized.
 
 ```bash
 git clone https://github.com/drakulavich/kesha-interpreter.git
-cd ar-en-simul
+cd kesha-interpreter
 bun install && bun link
 ```
 
 Requires [Bun](https://bun.sh) and `sox` (`brew install sox`).
 
-## Usage
+## Modes
+
+### Always listening (VAD)
 
 ```bash
-ar-en-simul --gpu <ip>                   # always listening (VAD)
-ar-en-simul --gpu <ip> --ptt             # push-to-talk (hold SPACE)
-ar-en-simul --gpu <ip> --voice Magpie-Multilingual.EN-US.Ray
-DEBUG=1 ar-en-simul --gpu <ip>           # debug: saves audio + event log
+kesha-interpreter --gpu <ip>
+```
+
+Mic is always on. Energy-based VAD detects speech segments automatically. English translation streams with ~2s delay while you're still speaking Arabic.
+
+### Push-to-talk (offline ASR)
+
+```bash
+kesha-interpreter --gpu <ip> --ptt
+```
+
+Hold **SPACE** to record, release to translate. Uses offline (unary) ASR for better accuracy — 69% vs 60% streaming on Arabic benchmarks. Shows "Recording..." while holding, then translates and speaks the full utterance at once.
+
+### Options
+
+```bash
+kesha-interpreter --gpu <ip> --voice Magpie-Multilingual.EN-US.Ray
+DEBUG=1 kesha-interpreter --gpu <ip>           # debug: saves audio + event log
 ```
 
 ## Server setup
@@ -80,7 +96,7 @@ Format: `Magpie-Multilingual.EN-US.<Name>` — emotions: `.Calm` `.Happy` `.Angr
 ## Debug mode
 
 ```bash
-DEBUG=1 ar-en-simul --gpu <ip>
+DEBUG=1 kesha-interpreter --gpu <ip>
 ```
 
 Saves to `/tmp/ar-en-debug-*.raw` (mic audio) and `.log.json` (timestamped events).
@@ -90,16 +106,17 @@ Replay: `play -t raw -r 16000 -b 16 -c 1 -e signed /tmp/ar-en-debug-*.raw`
 ## Testing
 
 ```bash
-GPU_HOST=<ip> bun test                           # all tests
-GPU_HOST=<ip> bun test tests/e2e.test.ts          # pipeline
-GPU_HOST=<ip> bun test tests/realtime.test.ts     # simultaneous with real Arabic
-GPU_HOST=<ip> bun test tests/simultaneous.test.ts # interpreter behavior
+GPU_HOST=<ip> bun test                              # all tests
+GPU_HOST=<ip> bun test tests/e2e.test.ts             # pipeline (streaming + offline)
+RUN_RIVA_E2E=1 GPU_HOST=<ip> bun test ./tests/ptt-offline.test.ts  # PTT offline mode
+GPU_HOST=<ip> bun test tests/realtime.test.ts        # simultaneous with real Arabic
+GPU_HOST=<ip> bun test tests/simultaneous.test.ts    # interpreter behavior
 ```
 
 ## Architecture
 
-- `src/riva.ts` — 3-hop gRPC with periodic translation + incremental TTS + echo suppression
-- `src/modes.ts` — VAD live mode + push-to-talk + debug recording
+- `src/riva.ts` — 3-hop gRPC: streaming S2S + offline `recognizeOffline()` + `translate()` + `synthesize()`
+- `src/modes.ts` — VAD live mode (streaming) + push-to-talk (offline) + debug recording
 - `src/audio.ts` — Mic via `rec`, playback via `afplay`
 - `src/vad.ts` — Energy-based VAD (160ms trigger, 2.5s silence)
 - `src/config.ts` — Endpoints, voices, VAD tuning

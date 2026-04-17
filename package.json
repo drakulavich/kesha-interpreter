@@ -1,11 +1,11 @@
 {
-  "name": "ar-en-simul",
+  "name": "kesha-interpreter",
   "version": "1.0.0",
   "description": "Simultaneous Arabic → English speech translator, powered by NVIDIA Riva NIM",
   "type": "module",
   "module": "src/index.ts",
   "bin": {
-    "ar-en-simul": "./src/index.ts"
+    "kesha-interpreter": "./src/index.ts"
   },
   "scripts": {
     "start": "bun run src/index.ts",

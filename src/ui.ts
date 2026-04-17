@@ -7,7 +7,7 @@ export const hideCursor = () => process.stdout.write("\x1b[?25l");
 
 export function header() {
   console.log();
-  console.log(pc.bold("  ar-en-simul") + pc.dim(" — Arabic → English"));
+  console.log(pc.bold("  kesha-interpreter") + pc.dim(" — Arabic → English"));
   console.log();
 }
 
@@ -19,4 +19,14 @@ export function ready(mode: string) {
 
 export function error(msg: string) {
   console.log(pc.red(`  ✗ `) + pc.dim(msg));
+}
+
+export function recording() {
+  clr();
+  process.stdout.write(pc.dim("  Recording..."));
+}
+
+export function translating() {
+  clr();
+  process.stdout.write(pc.dim("  Translating..."));
 }

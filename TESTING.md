@@ -25,7 +25,7 @@ bun install && bun link
 Run in **debug mode** — this records your speech and logs all events:
 
 ```bash
-DEBUG=1 ar-en-simul --gpu <server-ip>
+DEBUG=1 kesha-interpreter --gpu <server-ip>
 ```
 
 Then just **speak Arabic naturally** for 30-60 seconds. Talk about anything:
@@ -41,7 +41,7 @@ Press `q` when done.
 If the always-listening mode picks up too much background noise:
 
 ```bash
-DEBUG=1 ar-en-simul --gpu <server-ip> --ptt
+DEBUG=1 kesha-interpreter --gpu <server-ip> --ptt
 ```
 
 Hold **SPACE** while speaking, release when done.

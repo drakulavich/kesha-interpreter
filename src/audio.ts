@@ -52,7 +52,7 @@ export class Player {
     h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34);
     h.write("data", 36); h.writeUInt32LE(pcm.length, 40);
 
-    const tmpFile = `/tmp/ar-en-simul-${Date.now()}.wav`;
+    const tmpFile = `/tmp/kesha-interpreter-${Date.now()}.wav`;
     writeFileSync(tmpFile, Buffer.concat([h, pcm]));
 
     // afplay works alongside rec (separate CoreAudio streams)

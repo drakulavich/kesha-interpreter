@@ -66,7 +66,7 @@ export class RivaClient {
     return grpc.credentials.combineChannelCredentials(base, callCreds);
   }
 
-  private translate(text: string): Promise<string> {
+  translate(text: string): Promise<string> {
     return new Promise((resolve, reject) => {
       this.nmtStub.TranslateText({
         texts: [text],
@@ -79,7 +79,7 @@ export class RivaClient {
     });
   }
 
-  private synthesize(text: string): Promise<Buffer> {
+  synthesize(text: string): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       this.ttsStub.Synthesize({
         text,
@@ -91,6 +91,28 @@ export class RivaClient {
         if (err) return reject(err);
         resolve(Buffer.from(resp?.audio ?? []));
       });
+    });
+  }
+
+  recognizeOffline(audio: Buffer): Promise<string> {
+    return new Promise((resolve, reject) => {
+      this.asrStub.Recognize(
+        {
+          config: {
+            encoding: ENC_LINEAR_PCM,
+            sampleRateHertz: this.cfg.inputSampleRate,
+            languageCode: this.cfg.sourceLang,
+            audioChannelCount: 1,
+            enableAutomaticPunctuation: true,
+          },
+          audio,
+        },
+        (err: Error | null, resp: any) => {
+          if (err) return reject(err);
+          const text = resp?.results?.[0]?.alternatives?.[0]?.transcript ?? "";
+          resolve(text);
+        },
+      );
     });
   }
 

@@ -9,7 +9,7 @@ import { spawn } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
 
-const TMP = join(tmpdir(), "ar-en-simul-test.raw");
+const TMP = join(tmpdir(), "kesha-interpreter-test.raw");
 
 describe("Player playback", () => {
   test("writes audio bytes to sox stdin and sox exits cleanly", async () => {

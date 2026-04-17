@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * ar-en-simul — Arabic → English simultaneous interpreter
+ * kesha-interpreter — Arabic → English simultaneous interpreter
  *
  * 3-hop gRPC pipeline: Parakeet ASR → Riva NMT → Magpie TTS
  * Each service in its own NIM container on GPU.
@@ -14,7 +14,7 @@ import * as ui from "./ui.ts";
 
 const main = defineCommand({
   meta: {
-    name: "ar-en-simul",
+    name: "kesha-interpreter",
     description: "Arabic → English simultaneous speech translator (NVIDIA Riva NIM)",
     version: "1.0.0",
   },

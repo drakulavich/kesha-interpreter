@@ -52,12 +52,12 @@ export class RivaClient {
     const packageDef = protoLoader.loadSync(
       path.join(PROTO_DIR, "riva_nmt.proto"),
       {
-        keepCase: false, // gRPC.js convention: camelCase field names
+        keepCase: true, // keep snake_case to match Riva server expectations
         longs: String,
         enums: Number,
         defaults: true,
         oneofs: true,
-        includeDirs: [path.resolve(PROTO_DIR, "..")], // allow `import "riva/proto/..."`
+        includeDirs: [PROTO_DIR],
       },
     );
 
@@ -104,25 +104,24 @@ export class RivaClient {
     // Step 1: send the config message first.
     const configMsg = {
       config: {
-        asrConfig: {
+        asr_config: {
           encoding: ENC_LINEAR_PCM,
-          sampleRateHertz: this.cfg.inputSampleRate,
-          languageCode: this.cfg.sourceLang,
-          maxAlternatives: 1,
-          enableAutomaticPunctuation: true,
-          // Single channel only — Riva requirement.
-          audioChannelCount: 1,
+          sample_rate_hertz: this.cfg.inputSampleRate,
+          language_code: this.cfg.sourceLang,
+          max_alternatives: 1,
+          enable_automatic_punctuation: true,
+          audio_channel_count: 1,
         },
-        translationConfig: {
-          sourceLanguageCode: this.cfg.sourceLang,
-          targetLanguageCode: this.cfg.targetLang,
-          modelName: this.cfg.s2sModel,
+        translation_config: {
+          source_language_code: this.cfg.sourceLang,
+          target_language_code: this.cfg.targetLang,
+          model_name: this.cfg.s2sModel,
         },
-        ttsConfig: {
+        tts_config: {
           encoding: ENC_LINEAR_PCM,
-          sampleRateHz: this.cfg.outputSampleRate,
-          voiceName: this.cfg.voiceName,
-          languageCode: this.cfg.targetLang,
+          sample_rate_hz: this.cfg.outputSampleRate,
+          voice_name: this.cfg.voiceName,
+          language_code: this.cfg.targetLang,
         },
       },
     };
@@ -145,7 +144,7 @@ export class RivaClient {
     return {
       sendAudio(chunk: Buffer) {
         if (ended) return;
-        call.write({ audioContent: chunk });
+        call.write({ audio_content: chunk });
       },
       end() {
         if (ended) return;

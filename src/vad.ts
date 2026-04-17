@@ -38,6 +38,7 @@ export class VadSegmenter {
 
   private inSegment = false;
   private voicedRun = 0;
+  private pendingVoicedFrames: Buffer[] = [];
   private silentMsRun = 0;
   private segmentMs = 0;
 
@@ -80,15 +81,20 @@ export class VadSegmenter {
     } else {
       if (isVoice) {
         this.voicedRun++;
+        this.pendingVoicedFrames.push(frame);
         if (this.voicedRun >= VOICED_TRIGGER_FRAMES) {
           this.inSegment = true;
           this.silentMsRun = 0;
-          this.segmentMs = FRAME_MS * this.voicedRun;
+          this.segmentMs = FRAME_MS * this.pendingVoicedFrames.length;
           this.events.emit("segmentStart");
-          this.events.emit("frame", frame);
+          for (const bufferedFrame of this.pendingVoicedFrames) {
+            this.events.emit("frame", bufferedFrame);
+          }
+          this.pendingVoicedFrames = [];
         }
       } else {
         this.voicedRun = 0;
+        this.pendingVoicedFrames = [];
       }
     }
   }
@@ -97,6 +103,7 @@ export class VadSegmenter {
     if (this.inSegment) {
       this.inSegment = false;
       this.voicedRun = 0;
+      this.pendingVoicedFrames = [];
       this.silentMsRun = 0;
       this.segmentMs = 0;
       this.events.emit("segmentEnd");

@@ -126,6 +126,23 @@ bun run start -- --endpoint riva.example:443 --tls \
   --api-key "$NGC_API_KEY" --voice English-US.Male-1
 ```
 
+### Tests
+
+```bash
+# Fast local suite
+bun test
+
+# Same via package script
+bun run test
+
+# Live integration path against a real Riva server
+export RIVA_ENDPOINT=10.0.0.5:50051
+bun run test:riva:e2e
+```
+
+The live test is opt-in and only runs when `RUN_RIVA_E2E=1` is set by the
+script, so the default suite stays fast and deterministic.
+
 Full flags:
 
 ```

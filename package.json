@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "bun run src/index.ts",
-    "dev": "bun run --watch src/index.ts"
+    "dev": "bun run --watch src/index.ts",
+    "test": "bun test",
+    "test:riva:e2e": "RUN_RIVA_E2E=1 bun test tests/riva.e2e.test.ts"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.12.2",

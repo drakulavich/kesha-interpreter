@@ -12,27 +12,69 @@ import { RivaClient, type S2SSession } from "./riva.ts";
 import { VadSegmenter } from "./vad.ts";
 import * as ui from "./ui.ts";
 
-// ── Push-to-talk ─────────────────────────────────────────────────
+interface ModeUi {
+  listening(): void;
+  speechDetected(): void;
+  speaking(): void;
+  translating(): void;
+  error(msg: string): void;
+}
 
-export async function runPushToTalk(cfg: Config): Promise<void> {
-  const riva = new RivaClient(cfg);
-  const player = new Player(cfg.outputSampleRate);
-  const mic = openMic(cfg.inputSampleRate);
+interface Cancelable {
+  cancel(): void;
+}
 
+interface Keypress {
+  ctrl?: boolean;
+  name?: string;
+}
+
+export interface PushToTalkControllerDeps {
+  openSession(): S2SSession;
+  writeAudio(chunk: Buffer): void;
+  ui: ModeUi;
+  scheduleRelease?(fn: () => void, delayMs?: number): Cancelable;
+}
+
+export interface LiveControllerDeps {
+  openSession(): S2SSession;
+  writeAudio(chunk: Buffer): void;
+  ui: ModeUi;
+}
+
+function bindSession(session: S2SSession, deps: { writeAudio(chunk: Buffer): void; ui: ModeUi }): void {
+  session.events.on("audio", (buf: Buffer) => {
+    deps.ui.speaking();
+    deps.writeAudio(buf);
+  });
+  session.events.on("error", (err: Error) => deps.ui.error(err.message));
+  session.events.on("utteranceEnd", () => deps.ui.listening());
+}
+
+function defaultScheduleRelease(fn: () => void, delayMs = 0): Cancelable {
+  const timer = setTimeout(fn, delayMs);
+  return {
+    cancel() {
+      clearTimeout(timer);
+    },
+  };
+}
+
+export function createPushToTalkController(deps: PushToTalkControllerDeps) {
   let session: S2SSession | null = null;
   let talking = false;
+  let releaseHandle: Cancelable | null = null;
+  const scheduleRelease = deps.scheduleRelease ?? defaultScheduleRelease;
+  const GAP_MS = 250;
 
   const startUtterance = () => {
     talking = true;
-    session = riva.openS2S();
-    ui.speechDetected();
-    session.events.on("audio", (buf: Buffer) => {
-      ui.speaking();
-      player.write(buf);
+    session = deps.openSession();
+    bindSession(session, deps);
+    session.events.on("end", () => {
+      if (!talking) deps.ui.listening();
     });
-    session.events.on("error", (err: Error) => ui.error(err.message));
-    session.events.on("utteranceEnd", () => ui.listening());
-    session.events.on("end", () => { if (!talking) ui.listening(); });
+    deps.ui.speechDetected();
   };
 
   const endUtterance = () => {
@@ -40,40 +82,94 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
     talking = false;
     session.end();
     session = null;
-    ui.translating();
+    deps.ui.translating();
   };
 
+  return {
+    start() {
+      deps.ui.listening();
+    },
+    handleKeypress(key: Keypress) {
+      if ((key.ctrl && key.name === "c") || key.name === "q") return "quit";
+      if (key.name !== "space") return;
+
+      if (!talking) startUtterance();
+      releaseHandle?.cancel();
+      releaseHandle = scheduleRelease(() => {
+        endUtterance();
+      }, GAP_MS + 20);
+    },
+    handleMicData(chunk: Buffer) {
+      if (talking && session) session.sendAudio(chunk);
+    },
+    shutdown() {
+      releaseHandle?.cancel();
+      session?.close();
+      session = null;
+      talking = false;
+    },
+  };
+}
+
+export function createLiveController(deps: LiveControllerDeps) {
+  let session: S2SSession | null = null;
+
+  return {
+    handleSegmentStart() {
+      session = deps.openSession();
+      bindSession(session, deps);
+      deps.ui.speechDetected();
+    },
+    handleFrame(frame: Buffer) {
+      session?.sendAudio(frame);
+    },
+    handleSegmentEnd() {
+      if (!session) return;
+      const currentSession = session;
+      session = null;
+      currentSession.end();
+      deps.ui.translating();
+    },
+    isIdle() {
+      return session === null;
+    },
+    shutdown() {
+      session?.close();
+      session = null;
+    },
+  };
+}
+
+// ── Push-to-talk ─────────────────────────────────────────────────
+
+export async function runPushToTalk(cfg: Config): Promise<void> {
+  const riva = new RivaClient(cfg);
+  const player = new Player(cfg.outputSampleRate);
+  const mic = openMic(cfg.inputSampleRate);
+  const controller = createPushToTalkController({
+    openSession: () => riva.openS2S(),
+    writeAudio: (chunk) => player.write(chunk),
+    ui,
+  });
+
   mic.stream.on("data", (chunk: Buffer) => {
-    if (talking && session) session.sendAudio(chunk);
+    controller.handleMicData(chunk);
   });
 
   readline.emitKeypressEvents(process.stdin);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
-  // Key-repeat → treat rapid space presses as "held", release after gap
-  let lastSpaceMs = 0;
-  let releaseTimer: NodeJS.Timeout | null = null;
-  const GAP_MS = 250;
-
   process.stdin.on("keypress", (_str, key) => {
     if (!key) return;
-    if ((key.ctrl && key.name === "c") || key.name === "q") { shutdown(); return; }
-    if (key.name === "space") {
-      lastSpaceMs = Date.now();
-      if (!talking) startUtterance();
-      if (releaseTimer) clearTimeout(releaseTimer);
-      releaseTimer = setTimeout(() => {
-        if (Date.now() - lastSpaceMs >= GAP_MS) endUtterance();
-      }, GAP_MS + 20);
-    }
+    if (controller.handleKeypress(key) === "quit") shutdown();
   });
 
   mic.start();
-  ui.listening();
+  controller.start();
 
   const shutdown = () => {
     mic.stop();
-    if (session) session.close();
+    controller.shutdown();
     player.close();
     ui.clr();
     ui.showCursor();
@@ -99,35 +195,27 @@ export async function runLive(cfg: Config): Promise<void> {
     silenceMsToFlush: cfg.silenceMsToFlush,
     maxSegmentMs: cfg.maxSegmentMs,
   });
-
-  let session: S2SSession | null = null;
+  const controller = createLiveController({
+    openSession: () => riva.openS2S(),
+    writeAudio: (chunk) => player.write(chunk),
+    ui,
+  });
 
   // Breathing dot animation while idle
   const listenInterval = setInterval(() => {
-    if (!session) ui.listening();
+    if (controller.isIdle()) ui.listening();
   }, 400);
 
   vad.events.on("segmentStart", () => {
-    session = riva.openS2S();
-    ui.speechDetected();
-    session.events.on("audio", (buf: Buffer) => {
-      ui.speaking();
-      player.write(buf);
-    });
-    session.events.on("error", (err: Error) => ui.error(err.message));
-    session.events.on("utteranceEnd", () => ui.listening());
+    controller.handleSegmentStart();
   });
 
   vad.events.on("frame", (frame: Buffer) => {
-    if (session) session.sendAudio(frame);
+    controller.handleFrame(frame);
   });
 
   vad.events.on("segmentEnd", () => {
-    if (!session) return;
-    const s = session;
-    session = null;
-    s.end();
-    ui.translating();
+    controller.handleSegmentEnd();
   });
 
   mic.stream.on("data", (chunk: Buffer) => vad.feed(chunk));
@@ -137,7 +225,7 @@ export async function runLive(cfg: Config): Promise<void> {
     clearInterval(listenInterval);
     mic.stop();
     vad.flush();
-    if (session) session.close();
+    controller.shutdown();
     player.close();
     ui.clr();
     ui.showCursor();

@@ -113,49 +113,49 @@ export class RivaClient {
     });
 
     let lastTranscript = "";
-    let spokenEnglish = "";      // what we've already spoken
-    let ttsQueue = Promise.resolve(); // serialize TTS calls
-    let partialTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastTranslatedAr = "";
+    let spokenEnglish = "";
+    let ttsQueue = Promise.resolve();
+    let translating = false;
     let ended = false;
 
-    // Speak a chunk of English — only the NEW part not yet spoken
-    const speakChunk = (fullEnglish: string) => {
-      // Find new text beyond what's been spoken
-      let newText: string;
-      if (fullEnglish.toLowerCase().startsWith(spokenEnglish.toLowerCase())) {
-        newText = fullEnglish.slice(spokenEnglish.length).trim();
-      } else {
-        newText = fullEnglish;
-      }
+    // Periodically translate + speak new chunks (every 1.5s)
+    const translateAndSpeak = async () => {
+      if (translating || !lastTranscript || lastTranscript === lastTranslatedAr) return;
+      translating = true;
+      const arabic = lastTranscript;
+      lastTranslatedAr = arabic;
 
-      if (newText.length < 20) return; // wait for substantial chunk
+      try {
+        const fullEn = await this.translate(arabic);
+        if (!fullEn) { translating = false; return; }
 
-      spokenEnglish = fullEnglish;
+        events.emit("partialTranslation", fullEn);
 
-      // Queue TTS so chunks play in order without overlap
-      ttsQueue = ttsQueue.then(async () => {
-        try {
-          const audio = await this.synthesize(newText);
-          if (audio.length > 0) {
-            events.emit("audio", audio);
-          }
-        } catch {}
-      });
+        // Only speak the NEW part
+        let newText: string;
+        if (fullEn.toLowerCase().startsWith(spokenEnglish.toLowerCase())) {
+          newText = fullEn.slice(spokenEnglish.length).trim();
+        } else if (!spokenEnglish) {
+          newText = fullEn;
+        } else {
+          newText = "";
+        }
+
+        if (newText.length >= 15) {
+          spokenEnglish = fullEn;
+          ttsQueue = ttsQueue.then(async () => {
+            try {
+              const audio = await this.synthesize(newText);
+              if (audio.length > 0) events.emit("audio", audio);
+            } catch {}
+          });
+        }
+      } catch {}
+      translating = false;
     };
 
-    // Debounced: translate partial ASR → show text + speak chunk
-    const onPartial = (arabic: string) => {
-      if (partialTimer) clearTimeout(partialTimer);
-      partialTimer = setTimeout(async () => {
-        try {
-          const en = await this.translate(arabic);
-          if (en) {
-            events.emit("partialTranslation", en);
-            speakChunk(en);
-          }
-        } catch {}
-      }, 600);
-    };
+    const speakInterval = setInterval(translateAndSpeak, 1500);
 
     asrCall.on("data", (msg: any) => {
       for (const result of msg?.results ?? []) {
@@ -163,7 +163,6 @@ export class RivaClient {
         if (text) {
           lastTranscript = text;
           events.emit("partial", text);
-          onPartial(text);
         }
       }
     });
@@ -172,7 +171,7 @@ export class RivaClient {
 
     // ASR done → speak any remaining unspoken text
     asrCall.on("end", async () => {
-      if (partialTimer) clearTimeout(partialTimer);
+      clearInterval(speakInterval);
 
       if (!lastTranscript) {
         events.emit("utteranceEnd");

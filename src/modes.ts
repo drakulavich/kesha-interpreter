@@ -26,6 +26,7 @@ function wireSession(session: S2SSession, player: Player, cfg: Config) {
     if (buf.length === 0) return;
     ui.speaking();
     player.write(buf);
+    player.flush(); // close stdin so sox can process and play
   });
   session.events.on("utteranceEnd", () => ui.listening());
   session.events.on("error", (err: Error) => ui.error(err.message));

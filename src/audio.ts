@@ -46,7 +46,13 @@ export class Player {
     }
   }
 
-  close(): void {
+  /** End current playback — sox needs stdin closed to process tempo effect. */
+  flush(): void {
     try { this.proc?.stdin?.end(); } catch {}
+    this.proc = null; // next write() spawns fresh sox
+  }
+
+  close(): void {
+    this.flush();
   }
 }

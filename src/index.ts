@@ -56,7 +56,7 @@ const main = defineCommand({
     },
     voice: {
       type: "string",
-      default: process.env.RIVA_VOICE ?? "Magpie-Multilingual.EN-US.Sofia",
+      default: process.env.RIVA_VOICE ?? "Magpie-Multilingual.EN-US.Leo",
       description: "TTS voice name",
     },
     source: {

@@ -39,7 +39,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
 
     sourceLang: "ar-AR",
     targetLang: "en-US",
-    voiceName: "Magpie-Multilingual.EN-US.Sofia",
+    voiceName: "Magpie-Multilingual.EN-US.Leo",
 
     inputSampleRate: Number(process.env.INPUT_SAMPLE_RATE ?? 16000),
     outputSampleRate: Number(process.env.OUTPUT_SAMPLE_RATE ?? 22050),

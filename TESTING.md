@@ -8,7 +8,8 @@ We need native Arabic speakers to test it and share results so we can improve AS
 
 - Mac with [Bun](https://bun.sh) installed
 - `sox` audio tool: `brew install sox`
-- Access to the GPU server (ask Anton for the IP)
+- **Presight VPN connected** (the GPU server is on the internal network)
+- GPU server IP (ask Anton)
 
 ## Setup (2 minutes)
 

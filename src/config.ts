@@ -1,13 +1,4 @@
-/**
- * Runtime configuration.
- *
- * Env vars:
- *   RIVA_ASR_ENDPOINT    ASR gRPC endpoint      (default: localhost:50055)
- *   RIVA_NMT_ENDPOINT    NMT gRPC endpoint      (default: localhost:50051)
- *   RIVA_TTS_ENDPOINT    TTS gRPC endpoint      (default: localhost:50056)
- *   RIVA_TLS             "1" for SSL             (default: 0)
- *   RIVA_API_KEY         NGC auth key            (optional)
- */
+/** Runtime configuration. Defaults are overridden by CLI args and env vars. */
 export interface Config {
   asrEndpoint: string;
   nmtEndpoint: string;

@@ -91,7 +91,6 @@ const main = defineCommand({
       verbose: args.verbose,
     });
 
-    // Health check all 3 services
     const services = [
       { name: "ASR", endpoint: cfg.asrEndpoint },
       { name: "NMT", endpoint: cfg.nmtEndpoint },

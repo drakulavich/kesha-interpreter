@@ -1,13 +1,10 @@
 /**
- * 3-hop gRPC pipeline: ASR (streaming) → NMT (unary) → TTS (unary/streaming)
+ * 3-hop gRPC pipeline: ASR (streaming) → NMT (unary) → TTS (unary)
  *
  * Each service runs in its own NIM container:
  *   - ASR: Parakeet 1.1B multilingual (streaming, returns partials)
  *   - NMT: Riva Translate 1.6B (unary, ar → en)
  *   - TTS: Magpie TTS multilingual (unary, returns PCM audio)
- *
- * The S2SSession interface stays the same as the old single-call approach,
- * so modes.ts doesn't need to change.
  */
 
 import * as grpc from "@grpc/grpc-js";
@@ -22,6 +19,15 @@ const PROTO_DIR = path.resolve(__dirname, "..", "protos");
 
 const ENC_LINEAR_PCM = 1;
 
+const PROTO_LOADER_OPTS: protoLoader.Options = {
+  keepCase: false,
+  longs: String,
+  enums: Number,
+  defaults: true,
+  oneofs: true,
+  includeDirs: [PROTO_DIR],
+};
+
 const GRPC_OPTS = {
   "grpc.max_receive_message_length": 64 * 1024 * 1024,
   "grpc.max_send_message_length": 64 * 1024 * 1024,
@@ -29,6 +35,18 @@ const GRPC_OPTS = {
   "grpc.keepalive_timeout_ms": 10_000,
   "grpc.keepalive_permit_without_calls": 1,
 };
+
+function loadStub(
+  protoFile: string,
+  servicePath: string,
+  endpoint: string,
+  creds: grpc.ChannelCredentials,
+): any {
+  const pkg = protoLoader.loadSync(path.join(PROTO_DIR, protoFile), PROTO_LOADER_OPTS);
+  const def = grpc.loadPackageDefinition(pkg) as any;
+  const Ctor = servicePath.split(".").reduce((obj: any, key: string) => obj[key], def);
+  return new Ctor(endpoint, creds, GRPC_OPTS);
+}
 
 export interface S2SSession {
   sendAudio(chunk: Buffer): void;
@@ -47,29 +65,9 @@ export class RivaClient {
     this.cfg = cfg;
     const creds = this.buildCredentials();
 
-    // Load ASR proto
-    const asrPkg = protoLoader.loadSync(
-      path.join(PROTO_DIR, "riva_asr.proto"),
-      { keepCase: false, longs: String, enums: Number, defaults: true, oneofs: true, includeDirs: [PROTO_DIR] },
-    );
-    const asrProto = grpc.loadPackageDefinition(asrPkg) as any;
-    this.asrStub = new asrProto.nvidia.riva.asr.RivaSpeechRecognition(cfg.asrEndpoint, creds, GRPC_OPTS);
-
-    // Load NMT proto
-    const nmtPkg = protoLoader.loadSync(
-      path.join(PROTO_DIR, "riva_nmt.proto"),
-      { keepCase: false, longs: String, enums: Number, defaults: true, oneofs: true, includeDirs: [PROTO_DIR] },
-    );
-    const nmtProto = grpc.loadPackageDefinition(nmtPkg) as any;
-    this.nmtStub = new nmtProto.nvidia.riva.nmt.RivaTranslation(cfg.nmtEndpoint, creds, GRPC_OPTS);
-
-    // Load TTS proto
-    const ttsPkg = protoLoader.loadSync(
-      path.join(PROTO_DIR, "riva_tts.proto"),
-      { keepCase: false, longs: String, enums: Number, defaults: true, oneofs: true, includeDirs: [PROTO_DIR] },
-    );
-    const ttsProto = grpc.loadPackageDefinition(ttsPkg) as any;
-    this.ttsStub = new ttsProto.nvidia.riva.tts.RivaSpeechSynthesis(cfg.ttsEndpoint, creds, GRPC_OPTS);
+    this.asrStub = loadStub("riva_asr.proto", "nvidia.riva.asr.RivaSpeechRecognition", cfg.asrEndpoint, creds);
+    this.nmtStub = loadStub("riva_nmt.proto", "nvidia.riva.nmt.RivaTranslation", cfg.nmtEndpoint, creds);
+    this.ttsStub = loadStub("riva_tts.proto", "nvidia.riva.tts.RivaSpeechSynthesis", cfg.ttsEndpoint, creds);
   }
 
   private buildCredentials(): grpc.ChannelCredentials {
@@ -83,21 +81,12 @@ export class RivaClient {
     return grpc.credentials.combineChannelCredentials(base, callCreds);
   }
 
-  /**
-   * Open a 3-hop session: ASR streaming → NMT → TTS.
-   *
-   * Audio chunks go to ASR. When ASR stream ends, the last transcript
-   * is translated via NMT, then synthesized via TTS. Audio chunks
-   * from TTS are emitted on the "audio" event.
-   */
+  /** Open a 3-hop session: ASR streaming → NMT → TTS. */
   openS2S(): S2SSession {
     const events = new EventEmitter();
     const cfg = this.cfg;
 
-    // Step 1: Open ASR streaming call
     const asrCall = this.asrStub.StreamingRecognize();
-
-    // Send ASR config
     asrCall.write({
       streamingConfig: {
         config: {
@@ -114,7 +103,6 @@ export class RivaClient {
     let lastTranscript = "";
     let ended = false;
 
-    // Collect ASR partials, track last transcript
     asrCall.on("data", (msg: any) => {
       for (const result of msg?.results ?? []) {
         const text = result?.alternatives?.[0]?.transcript ?? "";
@@ -127,7 +115,6 @@ export class RivaClient {
 
     asrCall.on("error", (err: Error) => events.emit("error", err));
 
-    // When ASR stream ends, run NMT → TTS
     asrCall.on("end", () => {
       if (!lastTranscript) {
         events.emit("utteranceEnd");
@@ -138,7 +125,6 @@ export class RivaClient {
       const arabic = lastTranscript;
       events.emit("transcript", arabic);
 
-      // Step 2: NMT
       this.nmtStub.TranslateText(
         {
           texts: [arabic],
@@ -161,7 +147,6 @@ export class RivaClient {
 
           events.emit("translation", english);
 
-          // Step 3: TTS
           this.ttsStub.Synthesize(
             {
               text: english,

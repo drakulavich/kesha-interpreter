@@ -1,6 +1,5 @@
 /**
  * Mic capture + speaker playback via sox subprocesses.
- * No native deps (no node-gyp for mic/speaker). Works on macOS + Linux.
  * Requires sox: `brew install sox` / `apt install sox`
  */
 
@@ -9,7 +8,6 @@ import type { Readable } from "node:stream";
 
 export interface MicHandle {
   readonly stream: Readable;
-  start(): void;
   stop(): void;
 }
 
@@ -21,7 +19,6 @@ export function openMic(sampleRate: number): MicHandle {
 
   return {
     stream: proc.stdout!,
-    start() { /* rec starts on spawn */ },
     stop() { proc.kill("SIGTERM"); },
   };
 }

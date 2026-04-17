@@ -1,12 +1,4 @@
-/**
- * Energy-based VAD segmenter. No native deps.
- *
- * Slices mic stream into 20ms frames, computes RMS energy, and emits
- * segment boundaries. Same state machine as before:
- *   - N consecutive voiced frames to open a segment
- *   - silenceMsToFlush of quiet frames to close
- *   - Force-close after maxSegmentMs
- */
+/** Energy-based VAD segmenter using RMS energy on 20 ms frames. */
 
 import { EventEmitter } from "node:events";
 

@@ -1,8 +1,4 @@
-/**
- * Push-to-talk and always-on (VAD) modes.
- *
- * One 3-hop session per utterance: ASR streaming → NMT → TTS.
- */
+/** Push-to-talk and always-on (VAD) modes. One 3-hop session per utterance. */
 
 import readline from "node:readline";
 import type { Config } from "./config.ts";
@@ -10,6 +6,8 @@ import { openMic, Player } from "./audio.ts";
 import { RivaClient, type S2SSession } from "./riva.ts";
 import { VadSegmenter } from "./vad.ts";
 import * as ui from "./ui.ts";
+
+let lastTranslation = "";
 
 function wireSession(session: S2SSession, player: Player, cfg: Config) {
   session.events.on("partial", (text: string) => {
@@ -19,18 +17,19 @@ function wireSession(session: S2SSession, player: Player, cfg: Config) {
     }
   });
   session.events.on("translation", (text: string) => {
+    if (text === lastTranslation) return;
+    lastTranslation = text;
     ui.clr();
     console.log(ui.pc.green("  ✓ ") + ui.pc.cyan(text));
   });
   session.events.on("audio", (buf: Buffer) => {
+    if (buf.length === 0) return;
     ui.speaking();
     player.write(buf);
   });
   session.events.on("utteranceEnd", () => ui.listening());
   session.events.on("error", (err: Error) => ui.error(err.message));
 }
-
-// ── Push-to-talk ─────────────────────────────────────────────────
 
 export async function runPushToTalk(cfg: Config): Promise<void> {
   const riva = new RivaClient(cfg);
@@ -79,7 +78,6 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
     }
   });
 
-  mic.start();
   ui.listening();
 
   const shutdown = () => {
@@ -97,8 +95,6 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
 
   return new Promise(() => {});
 }
-
-// ── Always-on (VAD) ──────────────────────────────────────────────
 
 export async function runLive(cfg: Config): Promise<void> {
   const riva = new RivaClient(cfg);
@@ -136,7 +132,6 @@ export async function runLive(cfg: Config): Promise<void> {
   });
 
   mic.stream.on("data", (chunk: Buffer) => vad.feed(chunk));
-  mic.start();
 
   const shutdown = () => {
     clearInterval(listenInterval);

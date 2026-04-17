@@ -177,7 +177,7 @@ export class RivaClient {
     asrCall.on("end", async () => {
       clearInterval(speakInterval);
 
-      if (!lastTranscript) {
+      if (!lastTranscript || lastTranscript.length < 10) {
         events.emit("utteranceEnd");
         events.emit("end");
         return;
@@ -185,7 +185,7 @@ export class RivaClient {
 
       try {
         const english = await this.translate(lastTranscript);
-        if (english) {
+        if (english && english.length >= 5) {
           events.emit("translation", english);
 
           // Speak only the remaining unspoken part
@@ -198,7 +198,7 @@ export class RivaClient {
             remaining = "";
           }
 
-          if (remaining) {
+          if (remaining && remaining.split(" ").length >= 2) {
             ttsQueue = ttsQueue.then(async () => {
               try {
                 const audio = await this.synthesize(remaining);

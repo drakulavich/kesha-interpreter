@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd ~/personal/repos/ar-en-simul && cat > /tmp/test_play.ts << 'EOF'\\nimport { spawn } from \\\"child_process\\\";\\n\\n// Get TTS audio\\nconst grpc = await import(\\\"@grpc/grpc-js\\\");\\nconst prot...",
-  "error": "Exit code 1\n190 | \n191 |         // Otherwise fetch from disk or network\n192 |         if (sync) {\n193 |             var source;\n194 |             try {\n195 |                 source = util.fs.readFileSync(filename).toString(\"utf8\");\n                                       ^\nENOENT: no such file or directory, open '/private/tmp/protos/riva_tts.proto'\n    path: \"/private/tmp/protos/riva_tts.proto\",\n syscall: \"open\",\n   errno: -2,\n    code: \"ENOENT\"\n\n      at fetch (/Users/anton.yakutovich/.bun/inst...",
-  "timestamp": "2026-04-17T10:11:45.729Z",
+  "tool_input_preview": "{\"command\":\"ssh -o ConnectTimeout=10 gpu 'echo ok'\",\"timeout\":15000,\"description\":\"Test SSH connectivity\"}",
+  "error": "Exit code 255\nssh: connect to host 10.119.62.29 port 22: Operation timed out",
+  "timestamp": "2026-04-17T10:51:39.179Z",
   "retry_count": 1
 }

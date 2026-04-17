@@ -49,9 +49,12 @@ function wireSession(session: S2SSession, player: Player, cfg: Config) {
     log(`ASR: ${text.slice(0, 60)}`);
     trackEvent("partial", text);
   });
+  let lastPartialShown = "";
   session.events.on("partialTranslation", (text: string) => {
     log(`NMT partial: ${text.slice(0, 60)}`);
     trackEvent("partialTranslation", text);
+    if (text === lastPartialShown) return; // skip duplicate
+    lastPartialShown = text;
     ui.clr();
     process.stdout.write(ui.pc.dim(`  ${text}`));
   });

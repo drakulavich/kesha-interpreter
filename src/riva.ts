@@ -87,13 +87,7 @@ export class RivaClient {
 
   /** Synthesize text via streaming TTS, emit "audio" chunks. */
   private synthesizeStream(text: string, events: EventEmitter): void {
-    const call = this.ttsStub.SynthesizeOnline({
-      text,
-      languageCode: this.cfg.targetLang,
-      encoding: ENC_LINEAR_PCM,
-      sampleRateHz: this.cfg.outputSampleRate,
-      voiceName: this.cfg.voiceName,
-    });
+    const call = this.ttsStub.SynthesizeOnline();
 
     call.on("data", (resp: any) => {
       const audio = resp?.audio;
@@ -106,6 +100,16 @@ export class RivaClient {
       events.emit("utteranceEnd");
       events.emit("end");
     });
+
+    // Send request and close write side
+    call.write({
+      text,
+      languageCode: this.cfg.targetLang,
+      encoding: ENC_LINEAR_PCM,
+      sampleRateHz: this.cfg.outputSampleRate,
+      voiceName: this.cfg.voiceName,
+    });
+    call.end();
   }
 
   openS2S(): S2SSession {

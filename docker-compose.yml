@@ -1,31 +1,63 @@
-# Docker Compose for the Linux GPU node.
-#
-# Brings up the three NVIDIA NIM microservices that back the CLI:
-#   • riva-asr   — Parakeet / Canary multilingual ASR (Arabic input)
-#   • riva-nmt   — Riva Translate 1.6B (ar → en text)
-#   • riva-tts   — FastPitch + HiFi-GAN English TTS
-#
-# The CLI's `StreamingTranslateSpeechToSpeech` RPC terminates on the NMT
-# container, which internally cascades to ASR and TTS over localhost. All three
-# services share an NGC cache volume so restarts are fast.
-#
-# Usage:
-#   1. On the Linux box, create a .env file next to this one:
-#        NGC_API_KEY=nvapi-xxxxxxxxxxxxxxxxxxxxxxx
-#   2. Authenticate once:
-#        echo "$NGC_API_KEY" | docker login nvcr.io -u '$oauthtoken' --password-stdin
-#   3. Bring it up:
-#        docker compose up -d
-#      First launch downloads ~20–40 GB of model weights.
-#   4. From your Mac, point the CLI at this host:
-#        RIVA_ENDPOINT=<linux-host-ip>:50051 bun run start
-#
-# GPU assignment: by default everything shares GPU 0. If you have multiple GPUs,
-# uncomment the `device_ids` in each service to pin them to different cards.
-
-name: kesha-interpreter
+name: ar-en-simul
 
 services:
+  riva-asr:
+    image: nvcr.io/nim/nvidia/parakeet-1-1b-rnnt-multilingual:latest
+    container_name: riva-asr
+    restart: unless-stopped
+    environment:
+      - NGC_API_KEY=${NGC_API_KEY:?set NGC_API_KEY in .env}
+      - NIM_HTTP_API_PORT=9000
+      - NIM_GRPC_API_PORT=50051
+      - NIM_TAGS_SELECTOR=${ASR_SELECTOR:-mode=all,type=prompt,vad=silero}
+    ports:
+      - "50055:50051"
+      - "9021:9000"
+    volumes:
+      - /soot/anton.yakutovich/nim_cache_asr:/opt/nim/.cache
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/v1/health/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 30
+      start_period: 15m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              device_ids: ["3"]
+
+  riva-tts:
+    image: nvcr.io/nim/nvidia/magpie-tts-multilingual:latest
+    container_name: riva-tts
+    restart: unless-stopped
+    environment:
+      - NGC_API_KEY=${NGC_API_KEY:?set NGC_API_KEY in .env}
+      - NIM_HTTP_API_PORT=9000
+      - NIM_GRPC_API_PORT=50051
+    ports:
+      - "50056:50051"
+      - "9022:9000"
+    volumes:
+      - /soot/anton.yakutovich/nim_cache_tts:/opt/nim/.cache
+    shm_size: "8gb"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/v1/health/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 30
+      start_period: 15m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              device_ids: ["1"]
+
   riva-nmt:
     image: nvcr.io/nim/nvidia/riva-translate-1_6b:latest
     container_name: riva-nmt
@@ -34,24 +66,20 @@ services:
       - NGC_API_KEY=${NGC_API_KEY:?set NGC_API_KEY in .env}
       - NIM_HTTP_API_PORT=9000
       - NIM_GRPC_API_PORT=50051
-      # Arabic <-> English profile. Override via .env if you want a different pair.
-      - NIM_TAGS_SELECTOR=${NMT_SELECTOR:-name=riva-translate-1_6b}
-      # Point the internal cascade at the sibling ASR and TTS services.
-      # (The NMT NIM will relay S2S calls to these via gRPC on the compose net.)
       - RIVA_ASR_URL=riva-asr:50051
       - RIVA_TTS_URL=riva-tts:50051
     ports:
-      - "50051:50051"   # gRPC — this is what the CLI connects to
-      - "9000:9000"     # HTTP proxy (optional, useful for curl-based health checks)
+      - "50051:50051"
+      - "9010:9000"
     volumes:
-      - nim_cache:/opt/nim/.cache
+      - /soot/anton.yakutovich/nim_cache_nmt:/opt/nim/.cache
     shm_size: "8gb"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9000/v1/health/ready || exit 1"]
       interval: 30s
       timeout: 5s
-      retries: 20
-      start_period: 10m
+      retries: 30
+      start_period: 15m
     depends_on:
       riva-asr:
         condition: service_healthy
@@ -63,80 +91,4 @@ services:
           devices:
             - driver: nvidia
               capabilities: [gpu]
-              # device_ids: ["0"]   # pin to a specific GPU if needed
-
-  riva-asr:
-    image: nvcr.io/nim/nvidia/parakeet-1-1b-rnnt-multilingual-asr:latest
-    container_name: riva-asr
-    restart: unless-stopped
-    environment:
-      - NGC_API_KEY=${NGC_API_KEY:?set NGC_API_KEY in .env}
-      - NIM_HTTP_API_PORT=9000
-      - NIM_GRPC_API_PORT=50051
-      # Streaming multilingual profile with explicit language prompting for Arabic.
-      # The prompt profile avoids auto-language-ID drift and exposes a valid
-      # streaming Arabic ASR model for the NMT cascade.
-      - NIM_TAGS_SELECTOR=${ASR_SELECTOR:-diarizer=sortformer,mode=all,type=prompt,vad=silero}
-    # Internal-only: only the NMT container talks to it. Publish a host port too
-    # if you want to curl it directly for debugging.
-    expose:
-      - "50051"
-      - "9000"
-    ports:
-      - "50052:50051"
-      - "9001:9000"
-    volumes:
-      - nim_cache:/opt/nim/.cache
-    shm_size: "8gb"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/v1/health/ready || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 20
-      start_period: 10m
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
-              # device_ids: ["0"]
-
-  riva-tts:
-    image: nvcr.io/nim/nvidia/riva-tts:latest
-    container_name: riva-tts
-    restart: unless-stopped
-    environment:
-      - NGC_API_KEY=${NGC_API_KEY:?set NGC_API_KEY in .env}
-      - NIM_HTTP_API_PORT=9000
-      - NIM_GRPC_API_PORT=50051
-      # FastPitch + HiFi-GAN en-US: ~22 ms first-audio latency on an A100.
-      - NIM_TAGS_SELECTOR=${TTS_SELECTOR:-name=fastpitch-hifigan-en-us}
-    expose:
-      - "50051"
-      - "9000"
-    ports:
-      - "50053:50051"
-      - "9002:9000"
-    volumes:
-      - nim_cache:/opt/nim/.cache
-    shm_size: "8gb"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/v1/health/ready || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 20
-      start_period: 10m
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
-              # device_ids: ["0"]
-
-volumes:
-  # Shared cache so the three NIMs don't each redownload common artifacts and
-  # restarts skip the lengthy model-pull phase.
-  nim_cache:
-    driver: local
+              device_ids: ["6"]

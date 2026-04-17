@@ -86,30 +86,29 @@ export class RivaClient {
   }
 
   /** Synthesize text via streaming TTS, emit "audio" chunks. */
-  private synthesizeStream(text: string, events: EventEmitter): void {
-    const call = this.ttsStub.SynthesizeOnline();
-
-    call.on("data", (resp: any) => {
-      const audio = resp?.audio;
-      if (audio && audio.length > 0) {
-        events.emit("audio", Buffer.from(audio));
-      }
-    });
-    call.on("error", (err: Error) => events.emit("error", err));
-    call.on("end", () => {
-      events.emit("utteranceEnd");
-      events.emit("end");
-    });
-
-    // Send request and close write side
-    call.write({
-      text,
-      languageCode: this.cfg.targetLang,
-      encoding: ENC_LINEAR_PCM,
-      sampleRateHz: this.cfg.outputSampleRate,
-      voiceName: this.cfg.voiceName,
-    });
-    call.end();
+  private synthesize(text: string, events: EventEmitter): void {
+    this.ttsStub.Synthesize(
+      {
+        text,
+        languageCode: this.cfg.targetLang,
+        encoding: ENC_LINEAR_PCM,
+        sampleRateHz: this.cfg.outputSampleRate,
+        voiceName: this.cfg.voiceName,
+      },
+      (err: Error | null, resp: any) => {
+        if (err) {
+          events.emit("error", err);
+          events.emit("end");
+          return;
+        }
+        const audio = resp?.audio;
+        if (audio && audio.length > 0) {
+          events.emit("audio", Buffer.from(audio));
+        }
+        events.emit("utteranceEnd");
+        events.emit("end");
+      },
+    );
   }
 
   openS2S(): S2SSession {
@@ -132,10 +131,42 @@ export class RivaClient {
 
     let lastTranscript = "";
     let lastPartialTranslation = "";
+    let spokenText = "";
     let partialTimer: ReturnType<typeof setTimeout> | null = null;
+    let speaking = false;
     let ended = false;
 
-    // Debounced partial translation — translate ASR partials on the fly
+    // Speak new text that hasn't been spoken yet
+    const speakNew = (fullEnglish: string) => {
+      if (speaking) return; // don't overlap
+      // Find the new part beyond what's been spoken
+      const newPart = fullEnglish.startsWith(spokenText)
+        ? fullEnglish.slice(spokenText.length).trim()
+        : fullEnglish;
+      if (!newPart || newPart.length < 10) return; // wait for substantial chunk
+      speaking = true;
+      spokenText = fullEnglish;
+      events.emit("partialTranslation", fullEnglish);
+      this.ttsStub.Synthesize(
+        {
+          text: newPart,
+          languageCode: this.cfg.targetLang,
+          encoding: ENC_LINEAR_PCM,
+          sampleRateHz: this.cfg.outputSampleRate,
+          voiceName: this.cfg.voiceName,
+        },
+        (err: Error | null, resp: any) => {
+          speaking = false;
+          if (err) return;
+          const audio = resp?.audio;
+          if (audio && audio.length > 0) {
+            events.emit("audio", Buffer.from(audio));
+          }
+        },
+      );
+    };
+
+    // Debounced partial translation + TTS
     const translatePartial = (arabic: string) => {
       if (partialTimer) clearTimeout(partialTimer);
       partialTimer = setTimeout(async () => {
@@ -143,7 +174,7 @@ export class RivaClient {
           const en = await this.translate(arabic);
           if (en && en !== lastPartialTranslation) {
             lastPartialTranslation = en;
-            events.emit("partialTranslation", en);
+            speakNew(en);
           }
         } catch {}
       }, 400);
@@ -180,7 +211,16 @@ export class RivaClient {
           return;
         }
         events.emit("translation", english);
-        this.synthesizeStream(english, events);
+        // Speak only the part not yet spoken from partials
+        const remaining = english.startsWith(spokenText)
+          ? english.slice(spokenText.length).trim()
+          : english;
+        if (remaining) {
+          this.synthesize(remaining, events);
+        } else {
+          events.emit("utteranceEnd");
+          events.emit("end");
+        }
       } catch (err) {
         events.emit("error", err);
         events.emit("end");

@@ -10,17 +10,17 @@ import * as ui from "./ui.ts";
 let lastTranslation = "";
 
 function wireSession(session: S2SSession, player: Player, cfg: Config) {
-  session.events.on("partial", (text: string) => {
-    if (cfg.verbose) {
-      ui.clr();
-      process.stdout.write(ui.pc.dim(`  ○ ${text}`));
-    }
+  // Dim partial English as ASR progresses
+  session.events.on("partialTranslation", (text: string) => {
+    ui.clr();
+    process.stdout.write(ui.pc.dim(`  ${text}`));
   });
+  // Final English — settled text
   session.events.on("translation", (text: string) => {
     if (text === lastTranslation) return;
     lastTranslation = text;
     ui.clr();
-    console.log(ui.pc.green("  ✓ ") + ui.pc.cyan(text));
+    console.log(ui.pc.green("  ✓ ") + ui.pc.white(text));
   });
   session.events.on("audio", (buf: Buffer) => {
     if (buf.length === 0) return;

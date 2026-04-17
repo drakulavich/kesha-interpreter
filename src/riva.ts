@@ -1,10 +1,8 @@
 /**
- * 3-hop gRPC pipeline: ASR (streaming) → NMT (unary) → TTS (unary)
+ * 3-hop gRPC pipeline: ASR (streaming) → NMT (debounced) → TTS (streaming)
  *
- * Each service runs in its own NIM container:
- *   - ASR: Parakeet 1.1B multilingual (streaming, returns partials)
- *   - NMT: Riva Translate 1.6B (unary, ar → en)
- *   - TTS: Magpie TTS multilingual (unary, returns PCM audio)
+ * ASR partials trigger debounced NMT calls — English text appears progressively.
+ * On ASR end, final translation triggers SynthesizeOnline for streamed audio.
  */
 
 import * as grpc from "@grpc/grpc-js";
@@ -20,12 +18,8 @@ const PROTO_DIR = path.resolve(__dirname, "..", "protos");
 const ENC_LINEAR_PCM = 1;
 
 const PROTO_LOADER_OPTS: protoLoader.Options = {
-  keepCase: false,
-  longs: String,
-  enums: Number,
-  defaults: true,
-  oneofs: true,
-  includeDirs: [PROTO_DIR],
+  keepCase: false, longs: String, enums: Number,
+  defaults: true, oneofs: true, includeDirs: [PROTO_DIR],
 };
 
 const GRPC_OPTS = {
@@ -36,16 +30,10 @@ const GRPC_OPTS = {
   "grpc.keepalive_permit_without_calls": 1,
 };
 
-function loadStub(
-  protoFile: string,
-  servicePath: string,
-  endpoint: string,
-  creds: grpc.ChannelCredentials,
-): any {
-  const pkg = protoLoader.loadSync(path.join(PROTO_DIR, protoFile), PROTO_LOADER_OPTS);
+function loadStub(proto: string, svcPath: string, endpoint: string, creds: grpc.ChannelCredentials): any {
+  const pkg = protoLoader.loadSync(path.join(PROTO_DIR, proto), PROTO_LOADER_OPTS);
   const def = grpc.loadPackageDefinition(pkg) as any;
-  const Ctor = servicePath.split(".").reduce((obj: any, key: string) => obj[key], def);
-  return new Ctor(endpoint, creds, GRPC_OPTS);
+  return new (svcPath.split(".").reduce((o: any, k: string) => o[k], def))(endpoint, creds, GRPC_OPTS);
 }
 
 export interface S2SSession {
@@ -64,7 +52,6 @@ export class RivaClient {
   constructor(cfg: Config) {
     this.cfg = cfg;
     const creds = this.buildCredentials();
-
     this.asrStub = loadStub("riva_asr.proto", "nvidia.riva.asr.RivaSpeechRecognition", cfg.asrEndpoint, creds);
     this.nmtStub = loadStub("riva_nmt.proto", "nvidia.riva.nmt.RivaTranslation", cfg.nmtEndpoint, creds);
     this.ttsStub = loadStub("riva_tts.proto", "nvidia.riva.tts.RivaSpeechSynthesis", cfg.ttsEndpoint, creds);
@@ -81,7 +68,46 @@ export class RivaClient {
     return grpc.credentials.combineChannelCredentials(base, callCreds);
   }
 
-  /** Open a 3-hop session: ASR streaming → NMT → TTS. */
+  /** Translate text via NMT (returns promise). */
+  private translate(text: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      this.nmtStub.TranslateText(
+        {
+          texts: [text],
+          sourceLanguage: this.cfg.sourceLang.split("-")[0],
+          targetLanguage: this.cfg.targetLang.split("-")[0],
+        },
+        (err: Error | null, resp: any) => {
+          if (err) return reject(err);
+          resolve(resp?.translations?.[0]?.text ?? "");
+        },
+      );
+    });
+  }
+
+  /** Synthesize text via streaming TTS, emit "audio" chunks. */
+  private synthesizeStream(text: string, events: EventEmitter): void {
+    const call = this.ttsStub.SynthesizeOnline({
+      text,
+      languageCode: this.cfg.targetLang,
+      encoding: ENC_LINEAR_PCM,
+      sampleRateHz: this.cfg.outputSampleRate,
+      voiceName: this.cfg.voiceName,
+    });
+
+    call.on("data", (resp: any) => {
+      const audio = resp?.audio;
+      if (audio && audio.length > 0) {
+        events.emit("audio", Buffer.from(audio));
+      }
+    });
+    call.on("error", (err: Error) => events.emit("error", err));
+    call.on("end", () => {
+      events.emit("utteranceEnd");
+      events.emit("end");
+    });
+  }
+
   openS2S(): S2SSession {
     const events = new EventEmitter();
     const cfg = this.cfg;
@@ -101,7 +127,23 @@ export class RivaClient {
     });
 
     let lastTranscript = "";
+    let lastPartialTranslation = "";
+    let partialTimer: ReturnType<typeof setTimeout> | null = null;
     let ended = false;
+
+    // Debounced partial translation — translate ASR partials on the fly
+    const translatePartial = (arabic: string) => {
+      if (partialTimer) clearTimeout(partialTimer);
+      partialTimer = setTimeout(async () => {
+        try {
+          const en = await this.translate(arabic);
+          if (en && en !== lastPartialTranslation) {
+            lastPartialTranslation = en;
+            events.emit("partialTranslation", en);
+          }
+        } catch {}
+      }, 400);
+    };
 
     asrCall.on("data", (msg: any) => {
       for (const result of msg?.results ?? []) {
@@ -109,69 +151,36 @@ export class RivaClient {
         if (text) {
           lastTranscript = text;
           events.emit("partial", text);
+          translatePartial(text);
         }
       }
     });
 
     asrCall.on("error", (err: Error) => events.emit("error", err));
 
-    asrCall.on("end", () => {
+    // On ASR end: final translate → streaming TTS
+    asrCall.on("end", async () => {
+      if (partialTimer) clearTimeout(partialTimer);
+
       if (!lastTranscript) {
         events.emit("utteranceEnd");
         events.emit("end");
         return;
       }
 
-      const arabic = lastTranscript;
-      events.emit("transcript", arabic);
-
-      this.nmtStub.TranslateText(
-        {
-          texts: [arabic],
-          sourceLanguage: cfg.sourceLang.split("-")[0], // "ar"
-          targetLanguage: cfg.targetLang.split("-")[0], // "en"
-        },
-        (nmtErr: Error | null, nmtResp: any) => {
-          if (nmtErr) {
-            events.emit("error", nmtErr);
-            events.emit("end");
-            return;
-          }
-
-          const english = nmtResp?.translations?.[0]?.text ?? "";
-          if (!english) {
-            events.emit("utteranceEnd");
-            events.emit("end");
-            return;
-          }
-
-          events.emit("translation", english);
-
-          this.ttsStub.Synthesize(
-            {
-              text: english,
-              languageCode: cfg.targetLang,
-              encoding: ENC_LINEAR_PCM,
-              sampleRateHz: cfg.outputSampleRate,
-              voiceName: cfg.voiceName,
-            },
-            (ttsErr: Error | null, ttsResp: any) => {
-              if (ttsErr) {
-                events.emit("error", ttsErr);
-                events.emit("end");
-                return;
-              }
-
-              const audio = ttsResp?.audio;
-              if (audio && audio.length > 0) {
-                events.emit("audio", Buffer.from(audio));
-              }
-              events.emit("utteranceEnd");
-              events.emit("end");
-            },
-          );
-        },
-      );
+      try {
+        const english = await this.translate(lastTranscript);
+        if (!english) {
+          events.emit("utteranceEnd");
+          events.emit("end");
+          return;
+        }
+        events.emit("translation", english);
+        this.synthesizeStream(english, events);
+      } catch (err) {
+        events.emit("error", err);
+        events.emit("end");
+      }
     });
 
     return {

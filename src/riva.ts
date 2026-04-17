@@ -142,8 +142,8 @@ export class RivaClient {
       this.nmtStub.TranslateText(
         {
           texts: [arabic],
-          sourceLanguageCode: cfg.sourceLang.split("-")[0], // "ar"
-          targetLanguageCode: cfg.targetLang.split("-")[0], // "en"
+          sourceLanguage: cfg.sourceLang.split("-")[0], // "ar"
+          targetLanguage: cfg.targetLang.split("-")[0], // "en"
         },
         (nmtErr: Error | null, nmtResp: any) => {
           if (nmtErr) {

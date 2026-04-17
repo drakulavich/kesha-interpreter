@@ -1,65 +1,110 @@
 #!/usr/bin/env bun
 /**
- * ar-en-simul: simultaneous Arabic → English speech translator.
+ * ar-en-simul — Arabic → English simultaneous interpreter
  *
- * Usage:
- *   bun run src/index.ts                        # push-to-talk (default)
- *   bun run src/index.ts --live                 # VAD / always-on
- *   bun run src/index.ts --endpoint 10.0.0.5:50051
- *   bun run src/index.ts --voice English-US.Male-1 --verbose
+ * Always listening by default. Single gRPC call to Riva NIM cascade
+ * (ASR → NMT → TTS) — all on GPU, ~500-900ms end-to-end.
  */
-import { Command } from "commander";
-import chalk from "chalk";
+
+import { defineCommand, runMain } from "citty";
+import * as grpc from "@grpc/grpc-js";
 import { loadConfig } from "./config.ts";
 import { runPushToTalk, runLive } from "./modes.ts";
+import * as ui from "./ui.ts";
 
-const program = new Command();
-program
-  .name("ar-en-simul")
-  .description("Simultaneous Arabic → English speech translator (NVIDIA Riva NIM)")
-  .option("--endpoint <host:port>", "Riva NMT gRPC endpoint", process.env.RIVA_ENDPOINT ?? "localhost:50051")
-  .option("--tls", "use TLS for the gRPC connection", process.env.RIVA_TLS === "1")
-  .option("--api-key <key>", "bearer token for the endpoint", process.env.RIVA_API_KEY)
-  .option("--live", "use VAD (always-on) mode instead of push-to-talk", false)
-  .option("--voice <name>", "Riva TTS voice name", "English-US.Female-1")
-  .option("--source <bcp47>", "source language code", "ar-AR")
-  .option("--target <bcp47>", "target language code", "en-US")
-  .option("--model <name>", "Riva S2S model name", "s2s_model")
-  .option("--in-sr <hz>", "mic sample rate in Hz", (v) => Number(v), 16000)
-  .option("--out-sr <hz>", "playback sample rate in Hz", (v) => Number(v), 44100)
-  .option("--vad <0-3>", "VAD aggressiveness (live mode)", (v) => Number(v), 2)
-  .option("--silence-ms <ms>", "silence to flush a segment (live mode)", (v) => Number(v), 600)
-  .option("--max-segment-ms <ms>", "hard cap per segment (live mode)", (v) => Number(v), 8000)
-  .option("-v, --verbose", "verbose logging", false);
+const main = defineCommand({
+  meta: {
+    name: "ar-en-simul",
+    description: "Arabic → English simultaneous speech translator (NVIDIA Riva NIM)",
+    version: "1.0.0",
+  },
+  args: {
+    endpoint: {
+      type: "string",
+      default: process.env.RIVA_ENDPOINT ?? "localhost:50051",
+      description: "Riva NMT gRPC endpoint (host:port)",
+    },
+    tls: {
+      type: "boolean",
+      default: process.env.RIVA_TLS === "1",
+      description: "Use TLS for gRPC",
+    },
+    "api-key": {
+      type: "string",
+      default: process.env.RIVA_API_KEY ?? "",
+      description: "Bearer token for the endpoint",
+    },
+    ptt: {
+      type: "boolean",
+      default: false,
+      description: "Push-to-talk mode (hold SPACE). Default is always-on VAD.",
+    },
+    voice: {
+      type: "string",
+      default: process.env.RIVA_VOICE ?? "Magpie-Multilingual.EN-US.Sofia",
+      description: "TTS voice name",
+    },
+    source: {
+      type: "string",
+      default: "ar-AR",
+      description: "Source language (BCP-47)",
+    },
+    target: {
+      type: "string",
+      default: "en-US",
+      description: "Target language (BCP-47)",
+    },
+    verbose: {
+      type: "boolean",
+      default: false,
+      description: "Verbose logging",
+    },
+  },
+  async run({ args }) {
+    ui.header();
 
-program.parse();
-const opts = program.opts();
+    const cfg = loadConfig({
+      endpoint: args.endpoint,
+      tls: args.tls,
+      apiKey: args["api-key"] || undefined,
+      voiceName: args.voice,
+      sourceLang: args.source,
+      targetLang: args.target,
+      verbose: args.verbose,
+    });
 
-const cfg = loadConfig({
-  endpoint: opts.endpoint,
-  tls: !!opts.tls,
-  apiKey: opts.apiKey,
-  voiceName: opts.voice,
-  sourceLang: opts.source,
-  targetLang: opts.target,
-  s2sModel: opts.model,
-  inputSampleRate: opts.inSr,
-  outputSampleRate: opts.outSr,
-  vadAggressiveness: Math.max(0, Math.min(3, opts.vad)) as 0 | 1 | 2 | 3,
-  silenceMsToFlush: opts.silenceMs,
-  maxSegmentMs: opts.maxSegmentMs,
-  verbose: !!opts.verbose,
+    // Health check — verify gRPC endpoint is reachable
+    ui.connecting(cfg.endpoint);
+    const healthy = await checkHealth(cfg.endpoint, cfg.tls);
+    if (healthy) {
+      ui.connected(cfg.endpoint);
+    } else {
+      ui.connectFailed(cfg.endpoint, "unreachable");
+      console.log(ui.pc.dim(`\n  Check that Riva NIM is running on ${cfg.endpoint}\n`));
+      process.exit(1);
+    }
+
+    const mode = args.ptt ? "Push-to-talk (SPACE)" : "Always listening";
+    ui.ready(mode);
+
+    const run = args.ptt ? runPushToTalk : runLive;
+    run(cfg).catch((err) => {
+      ui.error(err.message ?? err);
+      process.exit(1);
+    });
+  },
 });
 
-process.stdout.write(
-  chalk.bold("ar-en-simul  ") +
-    chalk.dim(
-      `→ ${cfg.endpoint}${cfg.tls ? " (TLS)" : ""}  ${cfg.sourceLang} → ${cfg.targetLang}  voice=${cfg.voiceName}\n`,
-    ),
-);
+async function checkHealth(endpoint: string, tls: boolean): Promise<boolean> {
+  return new Promise((resolve) => {
+    const creds = tls ? grpc.credentials.createSsl() : grpc.credentials.createInsecure();
+    const client = new grpc.Client(endpoint, creds);
+    const deadline = new Date(Date.now() + 5000);
+    client.waitForReady(deadline, (err) => {
+      client.close();
+      resolve(!err);
+    });
+  });
+}
 
-const main = opts.live ? runLive : runPushToTalk;
-main(cfg).catch((err) => {
-  console.error(chalk.red("fatal:"), err);
-  process.exit(1);
-});
+runMain(main);

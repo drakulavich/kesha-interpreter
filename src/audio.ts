@@ -1,75 +1,53 @@
 /**
- * Microphone capture and speaker playback.
- *
- * We use `mic` (sox/arecord/parec shim) for capture because it works on both
- * macOS and Linux without native builds, and `speaker` for playback because it
- * accepts raw PCM frames directly (matches what Riva TTS returns).
- *
- * Everything here is PCM16 LE mono — that's what Riva ASR wants and what Riva
- * TTS emits.
+ * Mic capture + speaker playback via sox subprocesses.
+ * No native deps (no node-gyp for mic/speaker). Works on macOS + Linux.
+ * Requires sox: `brew install sox` / `apt install sox`
  */
-import mic from "mic";
-import Speaker from "speaker";
-import { PassThrough, type Readable } from "node:stream";
+
+import { spawn, type ChildProcess } from "child_process";
+import type { Readable } from "node:stream";
 
 export interface MicHandle {
-  /** Readable stream of raw PCM16 LE mono frames at `sampleRate`. */
   readonly stream: Readable;
   start(): void;
   stop(): void;
 }
 
 export function openMic(sampleRate: number): MicHandle {
-  const instance = mic({
-    rate: String(sampleRate),
-    channels: "1",
-    bitwidth: "16",
-    encoding: "signed-integer",
-    endian: "little",
-    device: process.env.MIC_DEVICE, // optional override
-    debug: false,
-    // sox is the friendliest cross-platform backend.
-    fileType: "raw",
-  });
-  const stream = instance.getAudioStream();
-
-  // Swallow the spurious stderr noise that `sox` loves to produce when the
-  // input device changes sample rate mid-session.
-  stream.on("error", () => {});
+  const proc = spawn("rec", [
+    "-q", "-t", "raw", "-r", String(sampleRate),
+    "-c", "1", "-b", "16", "-e", "signed", "-",
+  ], { stdio: ["pipe", "pipe", "ignore"] });
 
   return {
-    stream,
-    start: () => instance.start(),
-    stop: () => instance.stop(),
+    stream: proc.stdout!,
+    start() { /* rec starts on spawn */ },
+    stop() { proc.kill("SIGTERM"); },
   };
 }
 
 export class Player {
-  private speaker: Speaker;
-  private pipe: PassThrough;
+  private proc: ChildProcess | null = null;
+  private readonly sampleRate: number;
 
   constructor(sampleRate: number) {
-    this.speaker = new Speaker({
-      channels: 1,
-      bitDepth: 16,
-      sampleRate,
-      signed: true,
-    });
-    this.pipe = new PassThrough();
-    this.pipe.pipe(this.speaker);
+    this.sampleRate = sampleRate;
   }
 
-  /** Enqueue a PCM16 LE mono chunk for playback. Non-blocking. */
   write(chunk: Buffer): void {
-    this.pipe.write(chunk);
+    if (!this.proc) {
+      this.proc = spawn("play", [
+        "-q", "-t", "raw", "-r", String(this.sampleRate),
+        "-b", "16", "-c", "1", "-e", "signed-integer", "-",
+      ], { stdio: ["pipe", "ignore", "ignore"] });
+      this.proc.on("close", () => { this.proc = null; });
+    }
+    if (this.proc?.stdin?.writable) {
+      this.proc.stdin.write(chunk);
+    }
   }
 
-  /** Flush any queued audio and close the speaker. */
   close(): void {
-    try {
-      this.pipe.end();
-    } catch {
-      /* ignore */
-    }
+    try { this.proc?.stdin?.end(); } catch {}
   }
 }

@@ -1,17 +1,18 @@
 /**
- * The two interaction modes.
+ * Push-to-talk and always-on (VAD) modes.
  *
- * Both of them share the same core idea: one Riva streaming-S2S call per
- * utterance. When the utterance ends, we .end() the stream so the server
- * flushes the tail of the translation, then we open a fresh stream for the
- * next utterance. This matches how Riva's cascade buffers its outputs.
+ * One Riva S2S stream per utterance. When the utterance ends, we .end()
+ * the stream so the server flushes translation, then open a fresh one.
  */
-import chalk from "chalk";
+
 import readline from "node:readline";
 import type { Config } from "./config.ts";
 import { openMic, Player } from "./audio.ts";
 import { RivaClient, type S2SSession } from "./riva.ts";
 import { VadSegmenter } from "./vad.ts";
+import * as ui from "./ui.ts";
+
+// ── Push-to-talk ─────────────────────────────────────────────────
 
 export async function runPushToTalk(cfg: Config): Promise<void> {
   const riva = new RivaClient(cfg);
@@ -20,21 +21,18 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
 
   let session: S2SSession | null = null;
   let talking = false;
-  let utterance = 0;
 
   const startUtterance = () => {
-    utterance += 1;
-    const n = utterance;
     talking = true;
     session = riva.openS2S();
-    process.stdout.write(chalk.green(`\n[${n}] ▶ speak (release space to translate)\n`));
-    session.events.on("audio", (buf: Buffer) => player.write(buf));
-    session.events.on("error", (err: Error) => {
-      console.error(chalk.red(`[${n}] riva error:`), err.message);
+    ui.speechDetected();
+    session.events.on("audio", (buf: Buffer) => {
+      ui.speaking();
+      player.write(buf);
     });
-    session.events.on("end", () => {
-      if (cfg.verbose) process.stdout.write(chalk.gray(`[${n}] stream closed\n`));
-    });
+    session.events.on("error", (err: Error) => ui.error(err.message));
+    session.events.on("utteranceEnd", () => ui.listening());
+    session.events.on("end", () => { if (!talking) ui.listening(); });
   };
 
   const endUtterance = () => {
@@ -42,30 +40,24 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
     talking = false;
     session.end();
     session = null;
-    process.stdout.write(chalk.cyan("… translating …\n"));
+    ui.translating();
   };
 
   mic.stream.on("data", (chunk: Buffer) => {
     if (talking && session) session.sendAudio(chunk);
   });
 
-  // Keypress handling: hold SPACE to talk, release to finalize. q or Ctrl+C quits.
   readline.emitKeypressEvents(process.stdin);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
-  // In a terminal, "holding" a key yields key-repeat events rather than a clean
-  // down/up. We treat "any space press within 250ms of the last one" as still
-  // held, and auto-release after the gap.
+  // Key-repeat → treat rapid space presses as "held", release after gap
   let lastSpaceMs = 0;
   let releaseTimer: NodeJS.Timeout | null = null;
   const GAP_MS = 250;
 
   process.stdin.on("keypress", (_str, key) => {
     if (!key) return;
-    if ((key.ctrl && key.name === "c") || key.name === "q") {
-      shutdown();
-      return;
-    }
+    if ((key.ctrl && key.name === "c") || key.name === "q") { shutdown(); return; }
     if (key.name === "space") {
       lastSpaceMs = Date.now();
       if (!talking) startUtterance();
@@ -76,25 +68,26 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
     }
   });
 
-  process.stdout.write(
-    chalk.bold("\nPush-to-talk mode\n") +
-      chalk.dim("Hold SPACE to speak Arabic. Release to translate.  Press q to quit.\n"),
-  );
   mic.start();
+  ui.listening();
 
   const shutdown = () => {
     mic.stop();
     if (session) session.close();
     player.close();
+    ui.clr();
+    ui.showCursor();
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    process.stdout.write("\n");
+    console.log();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
-  // Keep the event loop alive.
   return new Promise(() => {});
 }
+
+// ── Always-on (VAD) ──────────────────────────────────────────────
 
 export async function runLive(cfg: Config): Promise<void> {
   const riva = new RivaClient(cfg);
@@ -108,17 +101,21 @@ export async function runLive(cfg: Config): Promise<void> {
   });
 
   let session: S2SSession | null = null;
-  let utterance = 0;
+
+  // Breathing dot animation while idle
+  const listenInterval = setInterval(() => {
+    if (!session) ui.listening();
+  }, 400);
 
   vad.events.on("segmentStart", () => {
-    utterance += 1;
-    const n = utterance;
     session = riva.openS2S();
-    process.stdout.write(chalk.green(`\n[${n}] ▶ speech detected\n`));
-    session.events.on("audio", (buf: Buffer) => player.write(buf));
-    session.events.on("error", (err: Error) => {
-      console.error(chalk.red(`[${n}] riva error:`), err.message);
+    ui.speechDetected();
+    session.events.on("audio", (buf: Buffer) => {
+      ui.speaking();
+      player.write(buf);
     });
+    session.events.on("error", (err: Error) => ui.error(err.message));
+    session.events.on("utteranceEnd", () => ui.listening());
   });
 
   vad.events.on("frame", (frame: Buffer) => {
@@ -130,26 +127,35 @@ export async function runLive(cfg: Config): Promise<void> {
     const s = session;
     session = null;
     s.end();
-    process.stdout.write(chalk.cyan("… translating …\n"));
+    ui.translating();
   });
 
   mic.stream.on("data", (chunk: Buffer) => vad.feed(chunk));
-
-  process.stdout.write(
-    chalk.bold("\nLive (VAD) mode\n") +
-      chalk.dim("Just start speaking Arabic. Each sentence is translated as you pause.  Ctrl+C to quit.\n"),
-  );
   mic.start();
 
   const shutdown = () => {
+    clearInterval(listenInterval);
     mic.stop();
     vad.flush();
     if (session) session.close();
     player.close();
-    process.stdout.write("\n");
+    ui.clr();
+    ui.showCursor();
+    console.log();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  // Quit on q
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", (chunk) => {
+      const key = chunk.toString();
+      if (key === "\x03" || key === "q" || key === "Q") shutdown();
+    });
+  }
 
   return new Promise(() => {});
 }

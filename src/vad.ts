@@ -1,21 +1,17 @@
 /**
- * Lightweight VAD-driven segmenter for --live mode.
+ * Energy-based VAD segmenter. No native deps.
  *
- * We slice the mic stream into 20-ms frames (webrtcvad-compatible), run each
- * frame through node-vad, and emit segment boundaries. The caller decides how
- * to react to boundaries (typically: close the current Riva RPC and open a new
- * one, so each utterance gets its own EOS and the server can flush TTS).
- *
- * The state machine is intentionally simple:
- *   - Need N consecutive VOICED frames to open a segment
- *   - Need `silenceMsToFlush` ms of UNVOICED frames to close a segment
- *   - Force-close after `maxSegmentMs` to bound latency on long monologues
+ * Slices mic stream into 20ms frames, computes RMS energy, and emits
+ * segment boundaries. Same state machine as before:
+ *   - N consecutive voiced frames to open a segment
+ *   - silenceMsToFlush of quiet frames to close
+ *   - Force-close after maxSegmentMs
  */
-import VAD from "node-vad";
+
 import { EventEmitter } from "node:events";
 
-const FRAME_MS = 20; // webrtcvad supports 10/20/30; 20 is a good sweet spot
-const VOICED_TRIGGER_FRAMES = 3; // ~60 ms of speech to open
+const FRAME_MS = 20;
+const VOICED_TRIGGER_FRAMES = 3;
 
 export interface VadOptions {
   sampleRate: number;
@@ -24,12 +20,20 @@ export interface VadOptions {
   maxSegmentMs: number;
 }
 
-export class VadSegmenter {
-  readonly events = new EventEmitter(); // "segmentStart", "frame"(Buffer), "segmentEnd"
+// RMS energy thresholds per aggressiveness level (lower = more sensitive)
+const THRESHOLDS: Record<number, number> = {
+  0: 200,   // permissive — picks up quiet speech
+  1: 400,
+  2: 800,   // aggressive — needs clear speech
+  3: 1500,  // very aggressive — loud speech only
+};
 
-  private vad: any;
-  private opts: VadOptions;
-  private framesize: number; // bytes per 20-ms frame
+export class VadSegmenter {
+  readonly events = new EventEmitter();
+
+  private readonly threshold: number;
+  private readonly frameSize: number;
+  private readonly opts: VadOptions;
   private buf: Buffer = Buffer.alloc(0);
 
   private inSegment = false;
@@ -39,42 +43,22 @@ export class VadSegmenter {
 
   constructor(opts: VadOptions) {
     this.opts = opts;
-    this.vad = new VAD(this.mapAggressiveness(opts.aggressiveness));
-    // Frame size in bytes = sampleRate * FRAME_MS/1000 * 2 (16-bit mono)
-    this.framesize = (opts.sampleRate * FRAME_MS * 2) / 1000;
+    this.threshold = THRESHOLDS[opts.aggressiveness] ?? THRESHOLDS[2];
+    this.frameSize = (opts.sampleRate * FRAME_MS * 2) / 1000; // bytes per frame (16-bit mono)
   }
 
-  private mapAggressiveness(a: number) {
-    switch (a) {
-      case 0: return VAD.Mode.NORMAL;
-      case 1: return VAD.Mode.LOW_BITRATE;
-      case 2: return VAD.Mode.AGGRESSIVE;
-      case 3: return VAD.Mode.VERY_AGGRESSIVE;
-      default: return VAD.Mode.AGGRESSIVE;
-    }
-  }
-
-  /** Feed raw mic bytes. The segmenter will slice into frames internally. */
   feed(chunk: Buffer): void {
     this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
 
-    while (this.buf.length >= this.framesize) {
-      const frame = this.buf.subarray(0, this.framesize);
-      this.buf = this.buf.subarray(this.framesize);
-      void this.processFrame(frame);
+    while (this.buf.length >= this.frameSize) {
+      const frame = this.buf.subarray(0, this.frameSize);
+      this.buf = this.buf.subarray(this.frameSize);
+      this.processFrame(frame);
     }
   }
 
-  private async processFrame(frame: Buffer) {
-    let isVoice = false;
-    try {
-      const res: number = await this.vad.processAudio(frame, this.opts.sampleRate);
-      // node-vad returns VAD.Event values; VOICE == 2.
-      isVoice = res === VAD.Event.VOICE;
-    } catch {
-      // If VAD hiccups, treat as silence — safer than false-positive triggering.
-      isVoice = false;
-    }
+  private processFrame(frame: Buffer): void {
+    const isVoice = rmsEnergy(frame) > this.threshold;
 
     if (this.inSegment) {
       this.events.emit("frame", frame);
@@ -86,11 +70,7 @@ export class VadSegmenter {
         this.silentMsRun += FRAME_MS;
       }
 
-      const shouldClose =
-        this.silentMsRun >= this.opts.silenceMsToFlush ||
-        this.segmentMs >= this.opts.maxSegmentMs;
-
-      if (shouldClose) {
+      if (this.silentMsRun >= this.opts.silenceMsToFlush || this.segmentMs >= this.opts.maxSegmentMs) {
         this.inSegment = false;
         this.voicedRun = 0;
         this.silentMsRun = 0;
@@ -99,13 +79,12 @@ export class VadSegmenter {
       }
     } else {
       if (isVoice) {
-        this.voicedRun += 1;
+        this.voicedRun++;
         if (this.voicedRun >= VOICED_TRIGGER_FRAMES) {
           this.inSegment = true;
           this.silentMsRun = 0;
           this.segmentMs = FRAME_MS * this.voicedRun;
           this.events.emit("segmentStart");
-          // Emit the buffered voiced frame too, otherwise we'd clip the onset.
           this.events.emit("frame", frame);
         }
       } else {
@@ -114,7 +93,6 @@ export class VadSegmenter {
     }
   }
 
-  /** Force-close any open segment (e.g. user hit Ctrl+C). */
   flush(): void {
     if (this.inSegment) {
       this.inSegment = false;
@@ -124,4 +102,14 @@ export class VadSegmenter {
       this.events.emit("segmentEnd");
     }
   }
+}
+
+function rmsEnergy(frame: Buffer): number {
+  let sum = 0;
+  const samples = frame.length / 2;
+  for (let i = 0; i < frame.length; i += 2) {
+    const s = frame.readInt16LE(i);
+    sum += s * s;
+  }
+  return Math.sqrt(sum / samples);
 }

@@ -26,6 +26,34 @@ const PROTO_DIR = path.resolve(__dirname, "..", "protos");
 // AudioEncoding enum values from riva_audio.proto
 const ENC_LINEAR_PCM = 1;
 
+export function buildS2SConfigMessage(cfg: Config) {
+  return {
+    config: {
+      asr_config: {
+        config: {
+          encoding: ENC_LINEAR_PCM,
+          sample_rate_hertz: cfg.inputSampleRate,
+          language_code: cfg.sourceLang,
+          max_alternatives: 1,
+          enable_automatic_punctuation: true,
+          audio_channel_count: 1,
+        },
+      },
+      translation_config: {
+        source_language_code: cfg.sourceLang,
+        target_language_code: cfg.targetLang,
+        model_name: cfg.s2sModel,
+      },
+      tts_config: {
+        encoding: ENC_LINEAR_PCM,
+        sample_rate_hz: cfg.outputSampleRate,
+        voice_name: cfg.voiceName,
+        language_code: cfg.targetLang,
+      },
+    },
+  };
+}
+
 // The types we actually touch; we keep it loose because proto-loader returns `any`.
 type StreamingS2SClient = grpc.Client & {
   StreamingTranslateSpeechToSpeech: () => grpc.ClientDuplexStream<unknown, unknown>;
@@ -102,30 +130,7 @@ export class RivaClient {
     const call = this.client.StreamingTranslateSpeechToSpeech();
 
     // Step 1: send the config message first.
-    const configMsg = {
-      config: {
-        asr_config: {
-          encoding: ENC_LINEAR_PCM,
-          sample_rate_hertz: this.cfg.inputSampleRate,
-          language_code: this.cfg.sourceLang,
-          max_alternatives: 1,
-          enable_automatic_punctuation: true,
-          audio_channel_count: 1,
-        },
-        translation_config: {
-          source_language_code: this.cfg.sourceLang,
-          target_language_code: this.cfg.targetLang,
-          model_name: this.cfg.s2sModel,
-        },
-        tts_config: {
-          encoding: ENC_LINEAR_PCM,
-          sample_rate_hz: this.cfg.outputSampleRate,
-          voice_name: this.cfg.voiceName,
-          language_code: this.cfg.targetLang,
-        },
-      },
-    };
-    call.write(configMsg);
+    call.write(buildS2SConfigMessage(this.cfg));
 
     call.on("data", (msg: any) => {
       const audio: Buffer | undefined = msg?.speech?.audio;

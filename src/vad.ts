@@ -3,7 +3,7 @@
 import { EventEmitter } from "node:events";
 
 const FRAME_MS = 20;
-const VOICED_TRIGGER_FRAMES = 3;
+const VOICED_TRIGGER_FRAMES = 8; // ~160ms of speech before opening segment
 
 export interface VadOptions {
   sampleRate: number;

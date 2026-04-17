@@ -136,7 +136,7 @@ export class RivaClient {
             events.emit("partialTranslation", en);
           }
         } catch {}
-      }, 400);
+      }, 800);
     };
 
     asrCall.on("data", (msg: any) => {

@@ -27,7 +27,7 @@ Mic → [Parakeet ASR :50055] → partials → [Riva NMT :50051] → English chu
 ## GPU Server
 
 ```bash
-cd ar-en-simul && docker compose up -d   # 3 containers: riva-asr, riva-nmt, riva-tts
+cd kesha-interpreter && docker compose up -d   # 3 containers: riva-asr, riva-nmt, riva-tts
 ```
 
 Ports: ASR=50055, NMT=50051, TTS=50056. Each on its own GPU.

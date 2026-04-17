@@ -23,7 +23,7 @@
 # GPU assignment: by default everything shares GPU 0. If you have multiple GPUs,
 # uncomment the `device_ids` in each service to pin them to different cards.
 
-name: ar-en-simul
+name: kesha-interpreter
 
 services:
   riva-nmt:

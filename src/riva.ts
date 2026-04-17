@@ -29,26 +29,30 @@ const ENC_LINEAR_PCM = 1;
 export function buildS2SConfigMessage(cfg: Config) {
   return {
     config: {
-      asr_config: {
+      asrConfig: {
         config: {
           encoding: ENC_LINEAR_PCM,
-          sample_rate_hertz: cfg.inputSampleRate,
-          language_code: cfg.sourceLang,
-          max_alternatives: 1,
-          enable_automatic_punctuation: true,
-          audio_channel_count: 1,
+          sampleRateHertz: cfg.inputSampleRate,
+          // Use en-US for ASR model lookup — the multilingual model auto-detects
+          // the actual language from audio. The NMT cascade strips region codes
+          // (ar-AR → ar) which breaks model matching. This workaround avoids it.
+          languageCode: "en-US",
+          maxAlternatives: 1,
+          enableAutomaticPunctuation: true,
+          audioChannelCount: 1,
         },
+        interimResults: cfg.interimResults,
       },
-      translation_config: {
-        source_language_code: cfg.sourceLang,
-        target_language_code: cfg.targetLang,
-        model_name: cfg.s2sModel,
+      translationConfig: {
+        sourceLanguageCode: cfg.sourceLang,
+        targetLanguageCode: cfg.targetLang,
+        modelName: cfg.s2sModel,
       },
-      tts_config: {
+      ttsConfig: {
         encoding: ENC_LINEAR_PCM,
-        sample_rate_hz: cfg.outputSampleRate,
-        voice_name: cfg.voiceName,
-        language_code: cfg.targetLang,
+        sampleRateHz: cfg.outputSampleRate,
+        voiceName: cfg.voiceName,
+        languageCode: cfg.targetLang,
       },
     },
   };
@@ -80,7 +84,7 @@ export class RivaClient {
     const packageDef = protoLoader.loadSync(
       path.join(PROTO_DIR, "riva_nmt.proto"),
       {
-        keepCase: true, // keep snake_case to match Riva server expectations
+        keepCase: false,
         longs: String,
         enums: Number,
         defaults: true,
@@ -149,7 +153,7 @@ export class RivaClient {
     return {
       sendAudio(chunk: Buffer) {
         if (ended) return;
-        call.write({ audio_content: chunk });
+        call.write({ audioContent: chunk });
       },
       end() {
         if (ended) return;

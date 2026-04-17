@@ -73,10 +73,10 @@ services:
       - NGC_API_KEY=${NGC_API_KEY:?set NGC_API_KEY in .env}
       - NIM_HTTP_API_PORT=9000
       - NIM_GRPC_API_PORT=50051
-      # Streaming profile with Silero VAD for partial results / endpointing.
-      # Use the "prompt" profile to force Arabic (otherwise multilingual auto-ID
-      # can misroute Arabic audio as Bengali/Tamil — see NVIDIA forum post).
-      - NIM_TAGS_SELECTOR=${ASR_SELECTOR:-name=parakeet-1-1b-rnnt-multilingual,mode=str,model_type=multi}
+      # Streaming multilingual profile with explicit language prompting for Arabic.
+      # The prompt profile avoids auto-language-ID drift and exposes a valid
+      # streaming Arabic ASR model for the NMT cascade.
+      - NIM_TAGS_SELECTOR=${ASR_SELECTOR:-diarizer=sortformer,mode=all,type=prompt,vad=silero}
     # Internal-only: only the NMT container talks to it. Publish a host port too
     # if you want to curl it directly for debugging.
     expose:

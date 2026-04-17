@@ -102,6 +102,11 @@ docker exec riva-asr env | grep -i NIM_TAGS_SELECTOR
 docker exec riva-asr ls /opt/nim/etc/default_config.d/
 ```
 
+For the default Arabic streaming setup in this repo, the ASR service should use
+the Parakeet RNNT multilingual **prompt** profile. The compose file defaults to
+`ASR_SELECTOR=diarizer=sortformer,mode=all,type=prompt,vad=silero`, which
+matches NVIDIA's documented streaming profile for prompt-conditioned Arabic.
+
 ## Client side: the CLI
 
 On your Mac:

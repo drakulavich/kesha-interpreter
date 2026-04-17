@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildS2SConfigMessage } from "../src/riva.ts";
 
 describe("buildS2SConfigMessage", () => {
-  test("uses grpc-js camelCase field names for the streaming config payload", () => {
+  test("uses grpc-js camelCase field names and nested ASR config for the streaming payload", () => {
     const msg = buildS2SConfigMessage({
       endpoint: "localhost:50051",
       tls: false,
@@ -22,12 +22,15 @@ describe("buildS2SConfigMessage", () => {
     expect(msg).toEqual({
       config: {
         asrConfig: {
-          encoding: 1,
-          sampleRateHertz: 16_000,
-          languageCode: "ar-AR",
-          maxAlternatives: 1,
-          enableAutomaticPunctuation: true,
-          audioChannelCount: 1,
+          config: {
+            encoding: 1,
+            sampleRateHertz: 16_000,
+            languageCode: "ar-AR",
+            maxAlternatives: 1,
+            enableAutomaticPunctuation: true,
+            audioChannelCount: 1,
+          },
+          interimResults: true,
         },
         translationConfig: {
           sourceLanguageCode: "ar-AR",

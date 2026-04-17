@@ -33,11 +33,9 @@ export class Player {
 
   write(chunk: Buffer): void {
     if (!this.proc) {
-      // tempo effect speeds up without changing pitch
       this.proc = spawn("play", [
         "-q", "-t", "raw", "-r", String(this.sampleRate),
         "-b", "16", "-c", "1", "-e", "signed-integer", "-",
-        "tempo", "1.3",
       ], { stdio: ["pipe", "ignore", "ignore"] });
       this.proc.on("close", () => { this.proc = null; });
     }

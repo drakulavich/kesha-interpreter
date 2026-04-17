@@ -10,25 +10,21 @@ import * as ui from "./ui.ts";
 let lastTranslation = "";
 
 function wireSession(session: S2SSession, player: Player, cfg: Config) {
-  // Dim partial English as ASR progresses
   session.events.on("partialTranslation", (text: string) => {
     ui.clr();
     process.stdout.write(ui.pc.dim(`  ${text}`));
   });
-  // Final English — settled text
   session.events.on("translation", (text: string) => {
     if (text === lastTranslation) return;
     lastTranslation = text;
     ui.clr();
-    console.log(ui.pc.green("  ✓ ") + ui.pc.white(text));
+    console.log(ui.pc.white(`  ${text}`));
   });
   session.events.on("audio", (buf: Buffer) => {
     if (buf.length === 0) return;
-    ui.speaking();
     player.write(buf);
-    player.flush(); // close stdin so sox can process and play
+    player.flush();
   });
-  session.events.on("utteranceEnd", () => ui.listening());
   session.events.on("error", (err: Error) => ui.error(err.message));
 }
 
@@ -44,7 +40,6 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
     talking = true;
     session = riva.openS2S();
     wireSession(session, player, cfg);
-    ui.speechDetected();
   };
 
   const endUtterance = () => {
@@ -52,7 +47,6 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
     talking = false;
     session.end();
     session = null;
-    ui.translating();
   };
 
   mic.stream.on("data", (chunk: Buffer) => {
@@ -79,7 +73,6 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
     }
   });
 
-  ui.listening();
 
   const shutdown = () => {
     mic.stop();
@@ -110,14 +103,10 @@ export async function runLive(cfg: Config): Promise<void> {
 
   let session: S2SSession | null = null;
 
-  const listenInterval = setInterval(() => {
-    if (!session) ui.listening();
-  }, 400);
 
   vad.events.on("segmentStart", () => {
     session = riva.openS2S();
     wireSession(session, player, cfg);
-    ui.speechDetected();
   });
 
   vad.events.on("frame", (frame: Buffer) => {
@@ -129,13 +118,11 @@ export async function runLive(cfg: Config): Promise<void> {
     const s = session;
     session = null;
     s.end();
-    ui.translating();
   });
 
   mic.stream.on("data", (chunk: Buffer) => vad.feed(chunk));
 
   const shutdown = () => {
-    clearInterval(listenInterval);
     mic.stop();
     vad.flush();
     if (session) session.close();

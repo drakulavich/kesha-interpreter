@@ -91,27 +91,13 @@ const main = defineCommand({
       verbose: args.verbose,
     });
 
-    const services = [
-      { name: "ASR", endpoint: cfg.asrEndpoint },
-      { name: "NMT", endpoint: cfg.nmtEndpoint },
-      { name: "TTS", endpoint: cfg.ttsEndpoint },
-    ];
-
-    let allHealthy = true;
-    for (const { name, endpoint } of services) {
-      ui.connecting(`${name} ${endpoint}`);
-      const ok = await checkHealth(endpoint, cfg.tls);
-      if (ok) {
-        ui.connected(`${name} ${endpoint}`);
-      } else {
-        ui.connectFailed(`${name} ${endpoint}`, "unreachable");
-        allHealthy = false;
+    for (const [name, ep] of [["ASR", cfg.asrEndpoint], ["NMT", cfg.nmtEndpoint], ["TTS", cfg.ttsEndpoint]]) {
+      const ok = await checkHealth(ep, cfg.tls);
+      console.log(ok ? ui.pc.dim(`  ✓ ${name} ${ep}`) : ui.pc.red(`  ✗ ${name} ${ep}`));
+      if (!ok) {
+        console.log(ui.pc.dim(`\n  Check Riva NIMs on ${gpu}\n`));
+        process.exit(1);
       }
-    }
-
-    if (!allHealthy) {
-      console.log(ui.pc.dim(`\n  Check that all Riva NIMs are running on ${gpu}\n`));
-      process.exit(1);
     }
 
     const mode = args.ptt ? "Push-to-talk (SPACE)" : "Always listening";

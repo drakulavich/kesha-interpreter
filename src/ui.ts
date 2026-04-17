@@ -20,3 +20,13 @@ export function ready(mode: string) {
 export function error(msg: string) {
   console.log(pc.red(`  ✗ `) + pc.dim(msg));
 }
+
+export function recording() {
+  clr();
+  process.stdout.write(pc.dim("  Recording..."));
+}
+
+export function translating() {
+  clr();
+  process.stdout.write(pc.dim("  Translating..."));
+}

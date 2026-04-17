@@ -34,7 +34,7 @@ English voice plays simultaneously as Arabic speech is recognized.
 ## Install
 
 ```bash
-git clone https://github.com/drakulavich/ar-en-simul.git
+git clone https://github.com/drakulavich/kesha-interpreter.git
 cd ar-en-simul
 bun install && bun link
 ```

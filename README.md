@@ -1,54 +1,109 @@
 # ar-en-simul
 
-Live Arabic → English speech translator. Speak Arabic, hear English. All on-prem.
+Simultaneous Arabic → English speech interpreter. Speaks English **while you're still talking Arabic** — like a UN interpreter with ~2s delay.
+
+All on-prem. No cloud APIs.
+
+## How it works
 
 ```
-Mic → [Parakeet ASR] → [Riva NMT] → [Magpie TTS] → Speaker
-       gRPC :50055      gRPC :50051   gRPC :50056
+Mic ──PCM──→ [Parakeet ASR] ──partials──→ [Riva NMT] ──text──→ [Magpie TTS] ──audio──→ Speaker
+              gRPC :50055                  gRPC :50051           gRPC :50056
+              streaming                    every 1s              per chunk
 ```
 
-## Quick Start
+Three NVIDIA NIM containers on your GPU server, connected via gRPC. The CLI translates ASR partials every second, speaks new English chunks immediately, and mutes the mic during playback to prevent echo.
+
+## Demo
+
+```
+  ar-en-simul — Arabic → English
+
+  ✓ ASR 10.119.62.29:50055
+  ✓ NMT 10.119.62.29:50051
+  ✓ TTS 10.119.62.29:50056
+  Always listening
+
+  Peace be upon you, my name is Abdullah.
+  I am always in the country of twenty-two and five.
+  I am currently in the kitchen and eat a salad.
+```
+
+English voice plays simultaneously as Arabic speech is recognized.
+
+## Install
 
 ```bash
-# 1. Clone & install
 git clone https://github.com/drakulavich/ar-en-simul.git
 cd ar-en-simul
-cp .env.example .env    # edit GPU_HOST
 bun install && bun link
-
-# 2. Start GPU services
-ssh gpu 'cd ar-en-simul && docker compose up -d'
-
-# 3. Run
-ar-en-simul --gpu <your-gpu-ip>
 ```
+
+Requires [Bun](https://bun.sh) and `sox` (`brew install sox`).
 
 ## Usage
 
 ```bash
-ar-en-simul                              # always listening (VAD)
-ar-en-simul --ptt                        # push-to-talk (hold SPACE)
-ar-en-simul --voice Magpie-Multilingual.EN-US.Ray
-ar-en-simul --verbose                    # show ASR partials
+ar-en-simul --gpu <ip>                   # always listening (VAD)
+ar-en-simul --gpu <ip> --ptt             # push-to-talk (hold SPACE)
+ar-en-simul --gpu <ip> --voice Magpie-Multilingual.EN-US.Ray
+DEBUG=1 ar-en-simul --gpu <ip>           # debug: saves audio + event log
 ```
+
+## Server setup
+
+```bash
+# On GPU server
+cp .env.example .env          # set NGC_API_KEY
+docker compose up -d          # starts ASR + NMT + TTS
+```
+
+First launch downloads ~30GB of models. Subsequent starts are instant.
+
+### Services
+
+| Container | Model | GPU | Port |
+|-----------|-------|-----|------|
+| riva-asr | [Parakeet 1.1B RNNT](https://build.nvidia.com/nvidia/parakeet-1-1b-rnnt-multilingual) | dedicated | 50055 |
+| riva-nmt | [Riva Translate 1.6B](https://build.nvidia.com/nvidia/riva-translate-1_6b) | dedicated | 50051 |
+| riva-tts | [Magpie TTS Multilingual](https://build.nvidia.com/nvidia/magpie-tts-multilingual) | dedicated | 50056 |
+
+Requires NVIDIA GPU with Docker + [NGC API key](https://org.ngc.nvidia.com/).
 
 ## Voices
 
 Male: `Leo` `Jason` `Ray` `Diego` `Pascal`
 Female: `Sofia` `Mia` `Aria` `Isabela` `Louise`
 
-Format: `Magpie-Multilingual.EN-US.<Name>` — add `.Calm` `.Happy` `.Angry` for emotions.
+Format: `Magpie-Multilingual.EN-US.<Name>` — emotions: `.Calm` `.Happy` `.Angry` `.Sad` `.Fearful`
 
-## Prerequisites
+## Debug mode
 
-- [Bun](https://bun.sh) + `sox` (`brew install sox`)
-- GPU server with Docker + NVIDIA runtime
-- [NGC API key](https://org.ngc.nvidia.com/)
+```bash
+DEBUG=1 ar-en-simul --gpu <ip>
+```
 
-## Models
+Saves to `/tmp/ar-en-debug-*.raw` (mic audio) and `.log.json` (timestamped events).
 
-| Service | Model | Port |
-|---------|-------|------|
-| ASR | [Parakeet 1.1B RNNT](https://build.nvidia.com/nvidia/parakeet-1-1b-rnnt-multilingual) | 50055 |
-| NMT | [Riva Translate 1.6B](https://build.nvidia.com/nvidia/riva-translate-1_6b) | 50051 |
-| TTS | [Magpie TTS Multilingual](https://build.nvidia.com/nvidia/magpie-tts-multilingual) | 50056 |
+Replay: `play -t raw -r 16000 -b 16 -c 1 -e signed /tmp/ar-en-debug-*.raw`
+
+## Testing
+
+```bash
+GPU_HOST=<ip> bun test                           # all tests
+GPU_HOST=<ip> bun test tests/e2e.test.ts          # pipeline
+GPU_HOST=<ip> bun test tests/realtime.test.ts     # simultaneous with real Arabic
+GPU_HOST=<ip> bun test tests/simultaneous.test.ts # interpreter behavior
+```
+
+## Architecture
+
+- `src/riva.ts` — 3-hop gRPC with periodic translation + incremental TTS + echo suppression
+- `src/modes.ts` — VAD live mode + push-to-talk + debug recording
+- `src/audio.ts` — Mic via `rec`, playback via `afplay`
+- `src/vad.ts` — Energy-based VAD (160ms trigger, 2.5s silence)
+- `src/config.ts` — Endpoints, voices, VAD tuning
+
+## License
+
+MIT

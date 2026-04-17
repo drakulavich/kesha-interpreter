@@ -1,8 +1,8 @@
 /**
- * 3-hop gRPC pipeline: ASR (streaming) → NMT (debounced) → TTS (streaming)
+ * 3-hop gRPC pipeline: ASR (streaming) → NMT (debounced) → TTS (unary)
  *
- * ASR partials trigger debounced NMT calls — English text appears progressively.
- * On ASR end, final translation triggers SynthesizeOnline for streamed audio.
+ * ASR partials → debounced NMT → show partial English text.
+ * ASR end → final NMT → TTS Synthesize → audio event.
  */
 
 import * as grpc from "@grpc/grpc-js";
@@ -68,7 +68,6 @@ export class RivaClient {
     return grpc.credentials.combineChannelCredentials(base, callCreds);
   }
 
-  /** Translate text via NMT (returns promise). */
   private translate(text: string): Promise<string> {
     return new Promise((resolve, reject) => {
       this.nmtStub.TranslateText(
@@ -85,30 +84,22 @@ export class RivaClient {
     });
   }
 
-  /** Synthesize text via streaming TTS, emit "audio" chunks. */
-  private synthesize(text: string, events: EventEmitter): void {
-    this.ttsStub.Synthesize(
-      {
-        text,
-        languageCode: this.cfg.targetLang,
-        encoding: ENC_LINEAR_PCM,
-        sampleRateHz: this.cfg.outputSampleRate,
-        voiceName: this.cfg.voiceName,
-      },
-      (err: Error | null, resp: any) => {
-        if (err) {
-          events.emit("error", err);
-          events.emit("end");
-          return;
-        }
-        const audio = resp?.audio;
-        if (audio && audio.length > 0) {
-          events.emit("audio", Buffer.from(audio));
-        }
-        events.emit("utteranceEnd");
-        events.emit("end");
-      },
-    );
+  private synthesize(text: string): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      this.ttsStub.Synthesize(
+        {
+          text,
+          languageCode: this.cfg.targetLang,
+          encoding: ENC_LINEAR_PCM,
+          sampleRateHz: this.cfg.outputSampleRate,
+          voiceName: this.cfg.voiceName,
+        },
+        (err: Error | null, resp: any) => {
+          if (err) return reject(err);
+          resolve(Buffer.from(resp?.audio ?? []));
+        },
+      );
+    });
   }
 
   openS2S(): S2SSession {
@@ -130,51 +121,19 @@ export class RivaClient {
     });
 
     let lastTranscript = "";
-    let lastPartialTranslation = "";
-    let spokenText = "";
+    let lastPartialEn = "";
     let partialTimer: ReturnType<typeof setTimeout> | null = null;
-    let speaking = false;
     let ended = false;
 
-    // Speak new text that hasn't been spoken yet
-    const speakNew = (fullEnglish: string) => {
-      if (speaking) return; // don't overlap
-      // Find the new part beyond what's been spoken
-      const newPart = fullEnglish.startsWith(spokenText)
-        ? fullEnglish.slice(spokenText.length).trim()
-        : fullEnglish;
-      if (!newPart || newPart.length < 10) return; // wait for substantial chunk
-      speaking = true;
-      spokenText = fullEnglish;
-      events.emit("partialTranslation", fullEnglish);
-      this.ttsStub.Synthesize(
-        {
-          text: newPart,
-          languageCode: this.cfg.targetLang,
-          encoding: ENC_LINEAR_PCM,
-          sampleRateHz: this.cfg.outputSampleRate,
-          voiceName: this.cfg.voiceName,
-        },
-        (err: Error | null, resp: any) => {
-          speaking = false;
-          if (err) return;
-          const audio = resp?.audio;
-          if (audio && audio.length > 0) {
-            events.emit("audio", Buffer.from(audio));
-          }
-        },
-      );
-    };
-
-    // Debounced partial translation + TTS
+    // Debounced partial: translate ASR text, show dim English
     const translatePartial = (arabic: string) => {
       if (partialTimer) clearTimeout(partialTimer);
       partialTimer = setTimeout(async () => {
         try {
           const en = await this.translate(arabic);
-          if (en && en !== lastPartialTranslation) {
-            lastPartialTranslation = en;
-            speakNew(en);
+          if (en && en !== lastPartialEn) {
+            lastPartialEn = en;
+            events.emit("partialTranslation", en);
           }
         } catch {}
       }, 400);
@@ -193,7 +152,7 @@ export class RivaClient {
 
     asrCall.on("error", (err: Error) => events.emit("error", err));
 
-    // On ASR end: final translate → streaming TTS
+    // ASR done → final NMT → TTS → audio
     asrCall.on("end", async () => {
       if (partialTimer) clearTimeout(partialTimer);
 
@@ -210,21 +169,19 @@ export class RivaClient {
           events.emit("end");
           return;
         }
+
         events.emit("translation", english);
-        // Speak only the part not yet spoken from partials
-        const remaining = english.startsWith(spokenText)
-          ? english.slice(spokenText.length).trim()
-          : english;
-        if (remaining) {
-          this.synthesize(remaining, events);
-        } else {
-          events.emit("utteranceEnd");
-          events.emit("end");
+
+        const audio = await this.synthesize(english);
+        if (audio.length > 0) {
+          events.emit("audio", audio);
         }
       } catch (err) {
         events.emit("error", err);
-        events.emit("end");
       }
+
+      events.emit("utteranceEnd");
+      events.emit("end");
     });
 
     return {

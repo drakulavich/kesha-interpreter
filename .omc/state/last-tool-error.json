@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd ~/personal/repos/ar-en-simul && GPU_HOST=10.119.62.29 bun test tests/e2e.test.ts 2>&1\",\"timeout\":120000,\"description\":\"Run E2E tests with simplified riva.ts\"}",
+  "error": "Exit code 1\nbun test v1.3.11 (af24e281)\n\ntests/e2e.test.ts:\n  NMT: \"مرحبا بالعالم\" → \"Welcome to the world\"\n  TTS: \"Hello world\" → 45056 bytes audio\n  TTS stream: 26 chunks, 153600 bytes total\n  Pipeline: \"ما أطول عودك\" → \"How long are you?\" → 51200 bytes (1.2s)\n  S2S events: \n  S2S audio: 0 bytes\n241 |     console.log(`  S2S events: ${events.join(\", \")}`);\n242 |     console.log(`  S2S audio: ${audioBytes} bytes`);\n243 | \n244 |     // The synthetic audio won't produce Arabic, so we may get error...",
+  "timestamp": "2026-04-17T10:00:27.942Z",
+  "retry_count": 1
+}

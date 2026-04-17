@@ -27,30 +27,40 @@ class FakeSession implements S2SSession {
   }
 }
 
-function createPushDeps(): PushToTalkControllerDeps & { session: FakeSession; uiEvents: string[] } {
-  const session = new FakeSession();
+function createPushDeps(): PushToTalkControllerDeps & {
+  processed: Buffer[];
+  uiEvents: string[];
+  cancelled: { value: boolean };
+} {
   const uiEvents: string[] = [];
+  const processed: Buffer[] = [];
+  const cancelled = { value: false };
 
   return {
-    openSession: () => session,
-    writeAudio: () => {},
+    minBufferedBytes: 5,
+    processAudio: async (audio: Buffer) => {
+      processed.push(Buffer.from(audio));
+    },
     ui: {
-      listening: () => uiEvents.push("listening"),
-      speechDetected: () => uiEvents.push("speechDetected"),
-      speaking: () => uiEvents.push("speaking"),
+      recording: () => uiEvents.push("recording"),
       translating: () => uiEvents.push("translating"),
       error: (msg: string) => uiEvents.push(`error:${msg}`),
     },
     scheduleRelease: (fn) => {
       createPushDeps.releaseHandler = fn;
-      return { cancel() {} };
+      return {
+        cancel() {
+          cancelled.value = true;
+        },
+      };
     },
-    session,
+    processed,
     uiEvents,
+    cancelled,
   };
 }
 
-createPushDeps.releaseHandler = (() => {}) as () => void;
+createPushDeps.releaseHandler = (async () => {}) as () => Promise<void>;
 
 function createLiveDeps(): LiveControllerDeps & { sessions: FakeSession[]; uiEvents: string[] } {
   const sessions: FakeSession[] = [];
@@ -62,11 +72,8 @@ function createLiveDeps(): LiveControllerDeps & { sessions: FakeSession[]; uiEve
       sessions.push(session);
       return session;
     },
-    writeAudio: () => {},
     ui: {
-      listening: () => uiEvents.push("listening"),
       speechDetected: () => uiEvents.push("speechDetected"),
-      speaking: () => uiEvents.push("speaking"),
       translating: () => uiEvents.push("translating"),
       error: (msg: string) => uiEvents.push(`error:${msg}`),
     },
@@ -77,33 +84,44 @@ function createLiveDeps(): LiveControllerDeps & { sessions: FakeSession[]; uiEve
 
 describe("createPushToTalkController", () => {
   beforeEach(() => {
-    createPushDeps.releaseHandler = () => {};
+    createPushDeps.releaseHandler = async () => {};
   });
 
-  test("starts on space, streams mic audio, and ends when release fires", () => {
+  test("buffers mic audio while space is held and processes it when release fires", async () => {
     const deps = createPushDeps();
     const controller = createPushToTalkController(deps);
-    const audio = Buffer.from("audio");
+    const firstChunk = Buffer.from("hello");
+    const secondChunk = Buffer.from("world");
 
-    controller.start();
     controller.handleKeypress({ name: "space" });
-    controller.handleMicData(audio);
-    createPushDeps.releaseHandler();
+    controller.handleMicData(firstChunk);
+    controller.handleMicData(secondChunk);
+    await createPushDeps.releaseHandler();
 
-    expect(deps.session.sentAudio).toEqual([audio]);
-    expect(deps.session.ended).toBe(true);
-    expect(deps.uiEvents).toEqual(["listening", "speechDetected", "translating"]);
+    expect(deps.processed).toEqual([Buffer.concat([firstChunk, secondChunk])]);
+    expect(deps.uiEvents).toEqual(["recording", "translating"]);
   });
 
-  test("shuts down the active session without ending the utterance", () => {
+  test("skips short recordings", async () => {
+    const deps = createPushDeps();
+    const controller = createPushToTalkController(deps);
+
+    controller.handleKeypress({ name: "space" });
+    controller.handleMicData(Buffer.from("no"));
+    await createPushDeps.releaseHandler();
+
+    expect(deps.processed).toEqual([]);
+    expect(deps.uiEvents).toEqual(["recording"]);
+  });
+
+  test("cancels the pending release timer during shutdown", () => {
     const deps = createPushDeps();
     const controller = createPushToTalkController(deps);
 
     controller.handleKeypress({ name: "space" });
     controller.shutdown();
 
-    expect(deps.session.closed).toBe(true);
-    expect(deps.session.ended).toBe(false);
+    expect(deps.cancelled.value).toBe(true);
   });
 });
 

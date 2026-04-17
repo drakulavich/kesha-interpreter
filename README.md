@@ -108,7 +108,7 @@ Replay: `play -t raw -r 16000 -b 16 -c 1 -e signed /tmp/ar-en-debug-*.raw`
 ```bash
 GPU_HOST=<ip> bun test                              # all tests
 GPU_HOST=<ip> bun test tests/e2e.test.ts             # pipeline (streaming + offline)
-GPU_HOST=<ip> bun test tests/ptt-offline.test.ts     # PTT offline mode
+RUN_RIVA_E2E=1 GPU_HOST=<ip> bun test ./tests/ptt-offline.test.ts  # PTT offline mode
 GPU_HOST=<ip> bun test tests/realtime.test.ts        # simultaneous with real Arabic
 GPU_HOST=<ip> bun test tests/simultaneous.test.ts    # interpreter behavior
 ```

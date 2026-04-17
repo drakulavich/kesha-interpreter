@@ -35,9 +35,9 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     inputSampleRate: Number(process.env.INPUT_SAMPLE_RATE ?? 16000),
     outputSampleRate: Number(process.env.OUTPUT_SAMPLE_RATE ?? 22050),
 
-    vadAggressiveness: 2,
-    silenceMsToFlush: 600,
-    maxSegmentMs: 8000,
+    vadAggressiveness: 1,
+    silenceMsToFlush: 1500,
+    maxSegmentMs: 15000,
 
     verbose: false,
   };

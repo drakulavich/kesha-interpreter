@@ -119,6 +119,23 @@ export class RivaClient {
     let translating = false;
     let ended = false;
 
+    /** Return the portion of `fullText` not yet spoken, or "" if mismatch. */
+    const unspokenText = (fullText: string): string => {
+      if (fullText.toLowerCase().startsWith(spokenEnglish.toLowerCase())) {
+        return fullText.slice(spokenEnglish.length).trim();
+      }
+      return spokenEnglish ? "" : fullText;
+    };
+
+    const enqueueTts = (text: string) => {
+      ttsQueue = ttsQueue.then(async () => {
+        try {
+          const audio = await this.synthesize(text);
+          if (audio.length > 0) events.emit("audio", audio);
+        } catch {}
+      });
+    };
+
     // Periodically translate + speak new chunks
     const translateAndSpeak = async () => {
       if (translating || !lastTranscript || lastTranscript === lastTranslatedAr) return;
@@ -135,25 +152,12 @@ export class RivaClient {
 
         events.emit("partialTranslation", fullEn);
 
-        // Only speak the NEW part beyond what's already been spoken
-        let newText: string;
-        if (fullEn.toLowerCase().startsWith(spokenEnglish.toLowerCase())) {
-          newText = fullEn.slice(spokenEnglish.length).trim();
-        } else if (!spokenEnglish) {
-          newText = fullEn;
-        } else {
-          newText = "";
-        }
+        const newText = unspokenText(fullEn);
 
         // Speak if we have a meaningful chunk (at least 3 words)
         if (newText.length >= 12 && newText.split(" ").length >= 3) {
           spokenEnglish = fullEn;
-          ttsQueue = ttsQueue.then(async () => {
-            try {
-              const audio = await this.synthesize(newText);
-              if (audio.length > 0) events.emit("audio", audio);
-            } catch {}
-          });
+          enqueueTts(newText);
         }
       } catch {}
       translating = false;
@@ -188,23 +192,9 @@ export class RivaClient {
         if (english && english.length >= 5) {
           events.emit("translation", english);
 
-          // Speak only the remaining unspoken part
-          let remaining: string;
-          if (english.toLowerCase().startsWith(spokenEnglish.toLowerCase())) {
-            remaining = english.slice(spokenEnglish.length).trim();
-          } else if (!spokenEnglish) {
-            remaining = english;
-          } else {
-            remaining = "";
-          }
-
+          const remaining = unspokenText(english);
           if (remaining && remaining.split(" ").length >= 2) {
-            ttsQueue = ttsQueue.then(async () => {
-              try {
-                const audio = await this.synthesize(remaining);
-                if (audio.length > 0) events.emit("audio", audio);
-              } catch {}
-            });
+            enqueueTts(remaining);
           }
         }
       } catch (err) {

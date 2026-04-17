@@ -3,7 +3,8 @@
  * Requires sox: `brew install sox` / `apt install sox`
  */
 
-import { spawn, type ChildProcess } from "child_process";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
 import type { Readable } from "node:stream";
 
 export interface MicHandle {
@@ -52,12 +53,11 @@ export class Player {
     h.write("data", 36); h.writeUInt32LE(pcm.length, 40);
 
     const tmpFile = `/tmp/ar-en-simul-${Date.now()}.wav`;
-    const fs = require("fs");
-    fs.writeFileSync(tmpFile, Buffer.concat([h, pcm]));
+    writeFileSync(tmpFile, Buffer.concat([h, pcm]));
 
     // afplay works alongside rec (separate CoreAudio streams)
     const p = spawn("afplay", [tmpFile], { stdio: "ignore" });
-    p.on("close", () => { try { fs.unlinkSync(tmpFile); } catch {} });
+    p.on("close", () => { try { unlinkSync(tmpFile); } catch {} });
   }
 
   close(): void {

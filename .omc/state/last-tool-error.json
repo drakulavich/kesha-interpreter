@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"ssh -o ConnectTimeout=10 gpu 'echo ok'\",\"timeout\":15000,\"description\":\"Test SSH connectivity\"}",
-  "error": "Exit code 255\nssh: connect to host 10.119.62.29 port 22: Operation timed out",
-  "timestamp": "2026-04-17T10:51:39.179Z",
-  "retry_count": 1
-}

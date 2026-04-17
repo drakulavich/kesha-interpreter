@@ -141,6 +141,7 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
   });
 
   const shutdown = () => {
+    if (releaseTimer) clearTimeout(releaseTimer);
     mic.stop();
     if (session) session.close();
     player.close();

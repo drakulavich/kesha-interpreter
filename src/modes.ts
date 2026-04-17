@@ -44,8 +44,11 @@ function recordAudio(chunk: Buffer) {
   if (audioFile) audioFile.write(chunk);
 }
 
+let muted = false;
+
 function wireSession(session: S2SSession, player: Player, cfg: Config) {
   session.events.on("partial", (text: string) => {
+    if (muted) return; // ignore ASR while TTS is playing (echo suppression)
     log(`ASR: ${text.slice(0, 60)}`);
     trackEvent("partial", text);
   });
@@ -71,10 +74,14 @@ function wireSession(session: S2SSession, player: Player, cfg: Config) {
   });
   session.events.on("audio", (buf: Buffer) => {
     if (buf.length === 0) return;
-    log(`TTS: ${buf.length}b → player`);
+    log(`TTS: ${buf.length}b → player (muting mic)`);
     trackEvent("audio", `${buf.length}b`);
+    muted = true;
     player.write(buf);
     player.flush();
+    // Unmute after estimated playback duration + buffer
+    const durationMs = (buf.length / (cfg.outputSampleRate * 2)) * 1000;
+    setTimeout(() => { muted = false; log("mic unmuted"); }, durationMs + 300);
   });
   session.events.on("utteranceEnd", () => {
     log("utteranceEnd");
@@ -117,7 +124,7 @@ export async function runPushToTalk(cfg: Config): Promise<void> {
 
   mic.stream.on("data", (chunk: Buffer) => {
     recordAudio(chunk);
-    if (talking && session) session.sendAudio(chunk);
+    if (talking && session && !muted) session.sendAudio(chunk);
   });
 
   readline.emitKeypressEvents(process.stdin);
@@ -179,7 +186,7 @@ export async function runLive(cfg: Config): Promise<void> {
   });
 
   vad.events.on("frame", (frame: Buffer) => {
-    if (session) session.sendAudio(frame);
+    if (session && !muted) session.sendAudio(frame);
   });
 
   vad.events.on("segmentEnd", () => {

@@ -1,8 +1,8 @@
 /**
- * 3-hop gRPC pipeline: ASR (streaming) → NMT (debounced) → TTS (unary)
+ * 3-hop gRPC: ASR (streaming) → NMT (debounced) → TTS (per-chunk)
  *
- * ASR partials → debounced NMT → show partial English text.
- * ASR end → final NMT → TTS Synthesize → audio event.
+ * Simultaneous interpreter: translates and speaks with ~2s delay,
+ * overlapping with the Arabic speaker. Doesn't wait for sentence end.
  */
 
 import * as grpc from "@grpc/grpc-js";
@@ -14,14 +14,12 @@ import type { Config } from "./config.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROTO_DIR = path.resolve(__dirname, "..", "protos");
-
 const ENC_LINEAR_PCM = 1;
 
 const PROTO_LOADER_OPTS: protoLoader.Options = {
   keepCase: false, longs: String, enums: Number,
   defaults: true, oneofs: true, includeDirs: [PROTO_DIR],
 };
-
 const GRPC_OPTS = {
   "grpc.max_receive_message_length": 64 * 1024 * 1024,
   "grpc.max_send_message_length": 64 * 1024 * 1024,
@@ -70,35 +68,29 @@ export class RivaClient {
 
   private translate(text: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      this.nmtStub.TranslateText(
-        {
-          texts: [text],
-          sourceLanguage: this.cfg.sourceLang.split("-")[0],
-          targetLanguage: this.cfg.targetLang.split("-")[0],
-        },
-        (err: Error | null, resp: any) => {
-          if (err) return reject(err);
-          resolve(resp?.translations?.[0]?.text ?? "");
-        },
-      );
+      this.nmtStub.TranslateText({
+        texts: [text],
+        sourceLanguage: this.cfg.sourceLang.split("-")[0],
+        targetLanguage: this.cfg.targetLang.split("-")[0],
+      }, (err: Error | null, resp: any) => {
+        if (err) return reject(err);
+        resolve(resp?.translations?.[0]?.text ?? "");
+      });
     });
   }
 
   private synthesize(text: string): Promise<Buffer> {
     return new Promise((resolve, reject) => {
-      this.ttsStub.Synthesize(
-        {
-          text,
-          languageCode: this.cfg.targetLang,
-          encoding: ENC_LINEAR_PCM,
-          sampleRateHz: this.cfg.outputSampleRate,
-          voiceName: this.cfg.voiceName,
-        },
-        (err: Error | null, resp: any) => {
-          if (err) return reject(err);
-          resolve(Buffer.from(resp?.audio ?? []));
-        },
-      );
+      this.ttsStub.Synthesize({
+        text,
+        languageCode: this.cfg.targetLang,
+        encoding: ENC_LINEAR_PCM,
+        sampleRateHz: this.cfg.outputSampleRate,
+        voiceName: this.cfg.voiceName,
+      }, (err: Error | null, resp: any) => {
+        if (err) return reject(err);
+        resolve(Buffer.from(resp?.audio ?? []));
+      });
     });
   }
 
@@ -121,22 +113,48 @@ export class RivaClient {
     });
 
     let lastTranscript = "";
-    let lastPartialEn = "";
+    let spokenEnglish = "";      // what we've already spoken
+    let ttsQueue = Promise.resolve(); // serialize TTS calls
     let partialTimer: ReturnType<typeof setTimeout> | null = null;
     let ended = false;
 
-    // Debounced partial: translate ASR text, show dim English
-    const translatePartial = (arabic: string) => {
+    // Speak a chunk of English — only the NEW part not yet spoken
+    const speakChunk = (fullEnglish: string) => {
+      // Find new text beyond what's been spoken
+      let newText: string;
+      if (fullEnglish.toLowerCase().startsWith(spokenEnglish.toLowerCase())) {
+        newText = fullEnglish.slice(spokenEnglish.length).trim();
+      } else {
+        newText = fullEnglish;
+      }
+
+      if (newText.length < 20) return; // wait for substantial chunk
+
+      spokenEnglish = fullEnglish;
+
+      // Queue TTS so chunks play in order without overlap
+      ttsQueue = ttsQueue.then(async () => {
+        try {
+          const audio = await this.synthesize(newText);
+          if (audio.length > 0) {
+            events.emit("audio", audio);
+          }
+        } catch {}
+      });
+    };
+
+    // Debounced: translate partial ASR → show text + speak chunk
+    const onPartial = (arabic: string) => {
       if (partialTimer) clearTimeout(partialTimer);
       partialTimer = setTimeout(async () => {
         try {
           const en = await this.translate(arabic);
-          if (en && en !== lastPartialEn) {
-            lastPartialEn = en;
+          if (en) {
             events.emit("partialTranslation", en);
+            speakChunk(en);
           }
         } catch {}
-      }, 800);
+      }, 600);
     };
 
     asrCall.on("data", (msg: any) => {
@@ -145,14 +163,14 @@ export class RivaClient {
         if (text) {
           lastTranscript = text;
           events.emit("partial", text);
-          translatePartial(text);
+          onPartial(text);
         }
       }
     });
 
     asrCall.on("error", (err: Error) => events.emit("error", err));
 
-    // ASR done → final NMT → TTS → audio
+    // ASR done → speak any remaining unspoken text
     asrCall.on("end", async () => {
       if (partialTimer) clearTimeout(partialTimer);
 
@@ -164,24 +182,37 @@ export class RivaClient {
 
       try {
         const english = await this.translate(lastTranscript);
-        if (!english) {
-          events.emit("utteranceEnd");
-          events.emit("end");
-          return;
-        }
+        if (english) {
+          events.emit("translation", english);
 
-        events.emit("translation", english);
+          // Speak only the remaining unspoken part
+          let remaining: string;
+          if (english.toLowerCase().startsWith(spokenEnglish.toLowerCase())) {
+            remaining = english.slice(spokenEnglish.length).trim();
+          } else if (!spokenEnglish) {
+            remaining = english;
+          } else {
+            remaining = "";
+          }
 
-        const audio = await this.synthesize(english);
-        if (audio.length > 0) {
-          events.emit("audio", audio);
+          if (remaining) {
+            ttsQueue = ttsQueue.then(async () => {
+              try {
+                const audio = await this.synthesize(remaining);
+                if (audio.length > 0) events.emit("audio", audio);
+              } catch {}
+            });
+          }
         }
       } catch (err) {
         events.emit("error", err);
       }
 
-      events.emit("utteranceEnd");
-      events.emit("end");
+      // Wait for TTS queue to drain before signaling end
+      ttsQueue.then(() => {
+        events.emit("utteranceEnd");
+        events.emit("end");
+      });
     });
 
     return {
